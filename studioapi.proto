@@ -1,0 +1,215 @@
+// This file describes the StudioAPI wire protocol. It can be compiled with
+// the Google Protobuf protoc compiler into native C++, Java, Python etc.
+
+// package StudioAPI.Proto;
+
+// option optimize_for = LITE_RUNTIME;
+// option java_package = "no.icd.studioapi.proto";
+
+/** Initial server connection response. */
+message Hello {
+  required string system_name = 1;
+  required uint32 compat_version = 2 [default = 1];
+  required uint32 incremental_version = 3 [default = 0];
+  repeated bytes public_key = 4;
+  optional bytes challenge = 5; // if challenge exists then server expects authentication (AuthRequest message)
+  optional string application_name = 6;
+  optional uint32 cdp_version_major = 7;
+  optional uint32 cdp_version_minor = 8;
+  optional uint32 cdp_version_patch = 9;
+}
+
+/** Server expects this response if it sent a auth_required true. */
+message AuthRequest {
+  optional string user_id = 1;
+  message ChallengeResponse {
+    optional string type = 1;
+    optional bytes response = 2; // data corresponding to the type, eg. hash(challenge + password)
+  }
+  repeated ChallengeResponse challenge_response = 2;
+}
+
+message AdditionalChallengeResponseRequired {
+  optional string type = 1;
+  optional string prompt = 2;
+  message Parameter {
+    optional string name = 1;
+    optional string value = 2;
+  }
+  repeated Parameter parameter = 3;
+}
+
+/** Sent by server as a response to a AuthRequest. */
+message AuthResponse {
+  enum AuthResultCode {
+    eUnknown = 0;
+    eGranted = 1;
+    eGrantedPasswordWillExpireSoon = 2; // expiry timestamp is provided in result_text
+    eNewPasswordRequired = 10; // AuthRequest with additional response with new username + password hash is required
+    eInvalidChallengeResponse = 11;
+    eAdditionalResponseRequired = 12;
+  }
+  optional AuthResultCode result_code = 1;
+  optional string result_text = 2;
+  repeated AdditionalChallengeResponseRequired additional_challenge_response_required = 3;
+}
+
+/** Common union-style base type for all Protobuf messages in StudioAPI. */
+message Container {
+  enum Type {
+    eRemoteError = 0;
+    eStructureRequest = 1;
+    eStructureResponse = 2;
+    eGetterRequest = 3;
+    eGetterResponse = 4;
+    eSetterRequest = 5;
+    eStructureChangeResponse = 6;
+    eCurrentTimeRequest = 7;
+    eCurrentTimeResponse = 8;
+    eChildAddRequest = 9;
+    eChildRemoveRequest = 10;
+  }
+  optional Type message_type = 1;
+  optional Error error = 2;
+  repeated uint32 structure_request = 3;
+  repeated Node structure_response = 4;
+  repeated ValueRequest getter_request = 5;
+  repeated VariantValue getter_response = 6;
+  repeated VariantValue setter_request = 7;
+  repeated uint32 structure_change_response = 8; // node ID's which need new structure requests
+  optional uint64 current_time_response = 9;
+  repeated ChildAdd child_add_request = 10;
+  repeated ChildRemove child_remove_request = 11;
+  extensions 100 to max;
+}
+
+/** Error message type. */
+message Error {
+  required uint32 code = 1;
+  optional string text = 2;
+  optional uint32 node_id = 3;
+  optional string parameter = 4;
+  extensions 100 to max;
+}
+
+enum RemoteErrorCode {
+  eINVALID_REQUEST = 10;
+  eUNSUPPORTED_CONTAINER_TYPE = 20;
+  eVALUE_THROTTLING_OCCURRING = 30;
+  eVALUE_THROTTLING_STOPPED = 31;
+  eCHILD_ADD_FAILED = 40;
+  eCHILD_REMOVE_FAILED = 50;
+}
+
+/** CDP Node base type identifier. */
+enum CDPNodeType {
+  CDP_UNDEFINED = -1;
+  CDP_SYSTEM = 0;
+  CDP_APPLICATION = 1;
+  CDP_COMPONENT = 2;
+  CDP_OBJECT = 3;
+  CDP_MESSAGE = 4;
+  CDP_BASE_OBJECT = 5;
+  CDP_PROPERTY = 6;
+  CDP_SETTING = 7;
+  CDP_ENUM = 8;
+  CDP_OPERATOR = 9;
+  CDP_NODE = 10;
+  CDP_USER_TYPE = 100;
+}
+
+/** CDP Node value type identifier. */
+enum CDPValueType {
+  eUNDEFINED = 0;
+  eDOUBLE = 1;
+  eUINT64 = 2;
+  eINT64 = 3;
+  eFLOAT = 4;
+  eUINT = 5;
+  eINT = 6;
+  eUSHORT = 7;
+  eSHORT = 8;
+  eUCHAR = 9;
+  eCHAR = 10;
+  eBOOL = 11;
+  eSTRING = 12;
+  eUSERTYPE = 100;
+}
+
+/** A single CDPNode property container. */
+message Info {
+  enum Flags {
+    eNone = 0;
+    eNodeIsLeaf = 1;
+    eValueIsPersistent = 2;
+    eValueIsReadOnly = 4;
+    eNodeIsRemovable = 8;
+    eNodeCanAddChildren = 16;
+    eNodeIsRenamable = 32;
+    eNodeIsInternal = 64;
+    eNodeIsImportant = 128;
+  }
+  required uint32 node_id = 1; // Application wide unique ID for each instance in CDP structure
+  required string name = 2; // Local short name
+  required CDPNodeType node_type = 3; // Direct base type, type of the class
+  optional CDPValueType value_type = 4; // Value primitive type the node holds if node may hold a value
+  optional string type_name = 5; // Real class name
+  optional string server_addr = 6; // If this node signifies another CDP application,
+                                 // this field will be the IP of said application's StudioAPIServer
+  optional uint32 server_port = 7; // .. and this is the port of the application's StudioAPIServer
+  optional bool is_local = 8; // if multiple applications are sent back from the server,
+                              // this flag is set to true for the app that the data was requested from
+  optional uint32 flags = 9;
+  extensions 100 to max;
+}
+
+/** CDP structure response data structure, a tree of Info properties. */
+message Node {
+  required Info info = 1;
+  repeated Node node = 2;
+  extensions 100 to max;
+}
+
+/** ChildAdd Request input structure */
+message ChildAdd {
+  required uint32 parent_node_id = 1; // parent to add the node into
+  required string child_name = 2; // child name to be added
+  required string child_type_name = 3; // child class name
+  extensions 100 to max;
+}
+
+/** ChildRemove Request input structure */
+message ChildRemove {
+  required uint32 parent_node_id = 1; // parent to remove the node from
+  required string child_name = 2; // child to be removed
+  extensions 100 to max;
+}
+
+/** Common Variant value type for a remote node. */
+message VariantValue {
+  optional uint32 node_id = 1;
+  optional double d_value = 2;
+  optional float f_value = 3;
+  optional uint64 ui64_value = 4;
+  optional sint64 i64_value = 5;
+  optional uint32 ui_value = 6;
+  optional sint32 i_value = 7;
+  optional uint32 us_value = 8;  // uint used as ushort (which protobuf doesnt have)
+  optional sint32 s_value = 9;   // int used as short
+  optional uint32 uc_value = 10; // uint used as uchar
+  optional sint32 c_value = 11;  // int used as char
+  optional bool b_value = 12;
+  optional string str_value = 13;
+  optional uint64 timestamp = 14; // Source may provide timestamp for sent value
+                                  // (UTC nanotime)
+  extensions 100 to max;
+}
+
+/** Single and periodic value request message. */
+message ValueRequest {
+  required uint32 node_id = 1; // List of node IDs whose value are requested
+  optional double fs = 2; // If present indicates that values expected no more often than provided FS rate
+                          // (server will accumulate and time-stamp values if they occur more often)
+  optional bool stop = 3; // If true target must stop updates on the provided values else this is start
+  extensions 100 to max;
+}
