@@ -145,9 +145,9 @@ studio.protocol = (function(ProtoBuf) {
 
     this.sendAuthRequest = function(lastAttemptErrorMessage = ""){
       authenticate(lastAttemptErrorMessage).then(function(authRequest){
-        var credentials = new TextEncoder().encode(authRequest.userID + ':' + authRequest.password); // encode to utf-8 byte array
+        var credentials = new TextEncoder().encode(authRequest.userID.toLowerCase() + ':' + authRequest.password); // encode to utf-8 byte array
         let authReq = new obj.AuthRequest();
-        authReq.user_id = authRequest.userID;
+        authReq.user_id = authRequest.userID.toLowerCase();
         var colon = new Int8Array([':'.charCodeAt(0)]);
         crypto.subtle.digest('SHA-256', credentials.buffer)
             .then(function(digest) {
