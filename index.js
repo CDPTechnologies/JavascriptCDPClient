@@ -168,7 +168,7 @@ studio.protocol = (function(ProtoBuf) {
             .catch(function(err) {
               console.error(err);
             });
-      });
+      }).catch(function(){ console.log("Authentication cancelled") });
     }.bind(this);
 
     this.handle = function(message){
