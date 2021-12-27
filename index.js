@@ -1,4 +1,4 @@
-import protobuf from 'protobufjs'
+import protobuf, { convertFieldsToCamelCase } from 'protobufjs'
 
 /**
  * The studio namespace.
@@ -140,35 +140,48 @@ studio.protocol = (function(ProtoBuf) {
     }.bind(this);
   }
 
-  function AuthHandler(socket, challenge, authenticate, onContainer, onError){
+  function AuthHandler(socket, hello, notificationListener, onContainer, onError){
     this.name = "AuthResponse";
+    let cdpVersion = hello.cdp_version_major + '.' + hello.cdp_version_minor + '.' + hello.cdp_version_patch
 
-    this.sendAuthRequest = function(lastAttemptErrorMessage = ""){
-      authenticate(lastAttemptErrorMessage).then(function(authRequest){
-        var credentials = new TextEncoder().encode(authRequest.userID.toLowerCase() + ':' + authRequest.password); // encode to utf-8 byte array
-        let authReq = new obj.AuthRequest();
-        authReq.user_id = authRequest.userID.toLowerCase();
-        var colon = new Int8Array([':'.charCodeAt(0)]);
-        crypto.subtle.digest('SHA-256', credentials.buffer)
-            .then(function(digest) {
-              let buffer = obj.appendBuffer(obj.appendBuffer(challenge, colon.buffer), digest);
-              crypto.subtle.digest('SHA-256', buffer)
-                  .then(function(challenge_digest) {
-                    let response = new obj.AuthRequestChallengeResponse();
-                    response.type = "PasswordHash";
-                    response.response = new Uint8Array(challenge_digest);
-                    authReq.challenge_response = new Array();
-                    authReq.challenge_response.push(response);
-                    socket.send(authReq.toArrayBuffer());
-                  })
-                  .catch(function(err) {
-                    console.error(err);
-                  });
-            })
-            .catch(function(err) {
-              console.error(err);
-            });
-      }).catch(function(){ console.log("Authentication cancelled") });
+    this.sendAuthRequest = function(){
+      let request = new studio.api.Request(hello.system_name, hello.application_name, cdpVersion, hello.system_use_notification);
+      let authReq = new obj.AuthRequest();
+      let applicationAccepted = {}
+
+      if (notificationListener && notificationListener.applicationAcceptanceRequested)
+        applicationAccepted = notificationListener.applicationAcceptanceRequested(request);
+      else
+        applicationAccepted = new Promise(function(resolve, reject) { window.confirm(hello.system_use_notification) ? resolve() : reject(); });
+
+      applicationAccepted
+        .then(function(){
+          return notificationListener.credentialsRequested(request)
+        })
+        .then(function(dict){
+          let username = dict.Username;
+          let password = dict.Password;
+          var credentials = new TextEncoder().encode(username.toLowerCase() + ':' + password); // encode to utf-8 byte array
+          authReq.user_id = username.toLowerCase();
+          return crypto.subtle.digest('SHA-256', credentials.buffer)
+        })
+        .then(function(digest) {
+          let challenge = hello.challenge.buffer.slice(hello.challenge.offset,hello.challenge.limit);
+          var colon = new Int8Array([':'.charCodeAt(0)]);
+          let buffer = obj.appendBuffer(obj.appendBuffer(challenge, colon.buffer), digest);
+          return crypto.subtle.digest('SHA-256', buffer)
+        })
+        .then(function(challenge_digest) {
+          let response = new obj.AuthRequestChallengeResponse();
+          response.type = "PasswordHash";
+          response.response = new Uint8Array(challenge_digest);
+          authReq.challenge_response = new Array();
+          authReq.challenge_response.push(response);
+          socket.send(authReq.toArrayBuffer());
+        })
+        .catch(function(){ 
+          console.log("Authentication cancelled.") 
+        });
     }.bind(this);
 
     this.handle = function(message){
@@ -189,13 +202,13 @@ studio.protocol = (function(ProtoBuf) {
       } else {
         console.log("Auth msg:" + authResponse.result_text + "\n");
         console.log("Unable to login with existing user, password.\n");
-        this.sendAuthRequest(authResponse.result_text);
+        this.sendAuthRequest(/*authResponse.result_text*/);
         return this;
       }
     }.bind(this);
   }
 
-  function HelloHandler(socket, authenticate, onContainer, onError){
+  function HelloHandler(socket, notificationListener, onContainer, onError){
     this.name = "Hello";
     this.handle = function(message){
       try {
@@ -207,14 +220,14 @@ studio.protocol = (function(ProtoBuf) {
       }
 
       if (hello.challenge) {
-        console.log(hello.challenge.buffer.slice(hello.challenge.offset,hello.challenge.limit));
-        if (!authenticate)
+        
+        if (!notificationListener || !notificationListener.credentialsRequested)
         {
-          console.log("No authenticate callback provided to studio.api.Client constructor. Can't authenticate connection!");
+          console.log("No notificationListener.credentialsRequested callback provided to studio.api.Client constructor. Can't authenticate connection!");
           return new ErrorHandler();
         }
 
-        let authHandler = new AuthHandler(socket, hello.challenge.buffer.slice(hello.challenge.offset,hello.challenge.limit), authenticate, onContainer, onError);
+        let authHandler = new AuthHandler(socket, hello, notificationListener, onContainer, onError);
         authHandler.sendAuthRequest();
         return authHandler;
       } else {
@@ -226,12 +239,12 @@ studio.protocol = (function(ProtoBuf) {
     };
   }
 
-  obj.Handler = function(socket, authenticate) {
+  obj.Handler = function(socket, notificationListener) {
     this.onContainer = undefined;
     this.onError = undefined;
     var onContainer = function(container) {(this.onContainer && this.onContainer(container));}.bind(this);
     var onError = function(){(this.onError && this.onError());}.bind(this);
-    var handler = new HelloHandler(socket, authenticate, onContainer, onError);
+    var handler = new HelloHandler(socket, notificationListener, onContainer, onError);
     this.handle = function(message){
       handler = handler.handle(message);
     };
@@ -447,13 +460,13 @@ studio.internal = (function(proto) {
     };
   }
 
-  obj.AppConnection = function(url, authenticate) {
+  obj.AppConnection = function(url, notificationListener) {
     var appConnection = this;
     var appName = "";
     var appId = undefined;
     var appUrl = (location.protocol=="https:" ? proto.WSS_PREFIX : proto.WS_PREFIX) + url;
     var socket = new WebSocket(appUrl);
-    var handler = new proto.Handler(socket, authenticate);
+    var handler = new proto.Handler(socket, notificationListener);
     var requests = [];
     var nodeMap = new Map();
     var systemNode = new AppNode(appConnection, proto.SYSTEM_NODE_ID);
@@ -521,7 +534,7 @@ studio.internal = (function(proto) {
       setTimeout(function () {
         console.log("REconnect timer");
         socket = new WebSocket(appUrl);
-        handler = new proto.Handler(socket, authenticate);
+        handler = new proto.Handler(socket, notificationListener);
         handler.onContainer = handleIncomingContainer;
         socket.binaryType = proto.BINARY_TYPE;
         socket.onopen = onOpen;
@@ -946,33 +959,32 @@ studio.api = (function(internal) {
 
   obj.structure = internal.structure;
 
-  /**
-   * Creates an instance of AuthRequest
-   *
-   * @param userID String user id to authenticate
-   * @param password String password to use
-   *
-   * @this AuthRequest
-   * @constructor
-   */
-  obj.AuthRequest = function(userID, password) {
-    var obj = {}
-    obj.userID = userID;
-    obj.password = password;
-    return obj;
+  obj.Request = function(systemName, applicationName, cdpVersion, systemUseNotification) {
+    this.systemName = function() {
+      return systemName;
+    }
+    this.applicationName = function() {
+      return applicationName;
+    }
+    this.cdpVersion = function() {
+      return cdpVersion;
+    }
+    this.systemUseNotification = function() {
+      return systemUseNotification;
+    }
   }
 
   /**
    * Creates an instance of Client
    *
    * @param studioURL String containing the address and port of StudioAPI server separated by colon character
-   * @param authenticate Function authenticate(lastAttemptMessage) returning a {Promise.<AuthRequest>} containing userID and password for authentication
+   * @param notificationListener Object returning two functions: applicationAcceptanceRequested(AuthRequest) and credentialsRequested(AuthRequest). Function credentialsRequested must return a Promise of dictionary containing 'Username' and 'Password' as keys for authentication.
    *
    * @this Client
    * @constructor
    */
-  obj.Client = function(studioURL, authenticate) {
-    var appConnection = new internal.AppConnection(studioURL, authenticate);
+  obj.Client = function(studioURL, notificationListener) {
+    var appConnection = new internal.AppConnection(studioURL, notificationListener);
 
     /**
      * Request root node.
@@ -1038,3 +1050,4 @@ studio.api = (function(internal) {
 })(studio.internal);
 
 export default studio
+
