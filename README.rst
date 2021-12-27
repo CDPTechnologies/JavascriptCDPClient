@@ -28,28 +28,65 @@ Before all examples, you need:
 Global API
 ~~~~~~~~~~
 
-studio.api.AuthRequest(userID, password)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+studio.api.Request(systemName, applicationName, cdpVersion, systemUseNotification)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 - Arguments
 
-    userID - User id to authenticate.
+    systemName - System name the application belongs to.
 
-    password - Password to use for login.
+    applicationName - Application name.
+      
+    cdpVersion - CDP version the application is built with.
+      
+    systemUseNotification - System use notification message to ask for confirmation to continue.
+      
+- Returns
+
+    The created Request object.
+    
+Instance Methods / Request
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+request.systemName()
+^^^^^^^^^^^^^^^^^^^^
 
 - Returns
 
-    The created AuthRequest object with provided login data.
+    System name the application belongs to.
+
+request.applicationName()
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+- Returns
+
+    Application name.
+
+request.cdpVersion()
+^^^^^^^^^^^^^^^^^^^^
+
+- Returns
+
+    CDP version the application is built with.
+
+request.systemUseNotification()
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+- Returns
+
+    System use notification message to ask for confirmation to continue.
 
 
-studio.api.Client(uri)
-^^^^^^^^^^^^^^^^^^^^^^^
+studio.api.Client(uri, notificationListener)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 - Arguments
 
     uri - String containing the address and port of StudioAPI server separated by colon character
 
-    authenticate - Function authenticate(lastAttemptMessage) returning a Promise.<AuthRequest> containing userID and password for authentication
+    notificationListener - Object returning two functions: applicationAcceptanceRequested(studio.api.Request) and credentialsRequested(studio.api.Request). 
+      Function applicationAcceptanceRequested must return a Promise of void. Can be used to popup system use notification message and ask for confirmation to continue.
+      Function credentialsRequested must return a Promise of dictionary containing 'Username' and 'Password' as keys for authentication.
 
 - Returns
 
@@ -70,15 +107,24 @@ studio.api.Client(uri)
     
     .. code:: javascript
 
-        // Create client with authentication connected to uri provided in browser address bar.
-        // The authenticator is only called when page requires a login.
-        var authenticator =  function(loginMessage) {
+        // Create client with NotificationListener connected to uri provided in browser address bar.
+        // The NotificationListener is only called when page requires a login.
+        
+        class NotificationListener {
+          applicationAcceptanceRequested(request) {
             return new Promise(function(resolve, reject) {
-              //Do something to get username and password variables
-              resolve(new studio.api.AuthRequest(username, password));
+              window.confirm(request.systemUseNotification()) ? resolve() : reject();
             });
-        };
-        var client = new studio.api.Client(window.location.host, authenticator);
+          }
+
+          credentialsRequested(request) {
+            return new Promise(function(resolve, reject) {
+              resolve({Username: "cdpuser", Password: "cdpuser"});
+            });
+          }
+        }
+
+        var client = new studio.api.Client(window.location.host, new NotificationListener());
 
 
 Instance Methods / Client
