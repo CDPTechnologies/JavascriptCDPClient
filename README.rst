@@ -113,13 +113,25 @@ studio.api.Client(uri, notificationListener)
         class NotificationListener {
           applicationAcceptanceRequested(request) {
             return new Promise(function(resolve, reject) {
-              window.confirm(request.systemUseNotification()) ? resolve() : reject();
+              if (request.systemUseNotification()) {
+                // Pop up a System Use Notification message and ask for confirmation to continue,
+                // then based on the user answer call either resolve() or reject()
+              } 
+              else
+                resolve();
             });
           }
 
           credentialsRequested(request) {
             return new Promise(function(resolve, reject) {
-              resolve({Username: "cdpuser", Password: "cdpuser"});
+              if (request.userAuthResult().code() == studio.api.CREDENTIALS_REQUIRED) {
+                // Do something to gather username and password variables (either sync or async way) and then call:
+                resolve({Username: "cdpuser", Password: "cdpuser"});
+              }
+              if (request.userAuthResult().code() == studio.api.REAUTHENTICATIONREQUIRED) {
+                // Pop user a message that idle lockout was happened and server requires new authentication to continue:
+                resolve({Username: "cdpuser", Password: "cdpuser"});
+              }
             });
           }
         }

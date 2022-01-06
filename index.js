@@ -28,6 +28,7 @@ studio.protocol = (function(ProtoBuf) {
   obj.Container = studioBuilder.build("Container");
   obj.ContainerType = studioBuilder.build("Container.Type");
   obj.Error = studioBuilder.build("Error");
+  obj.RemoteErrorCode = studioBuilder.build("RemoteErrorCode");
   obj.CDPNodeType = studioBuilder.build("CDPNodeType");
   obj.CDPValueType = studioBuilder.build("CDPValueType");
   obj.Info = studioBuilder.build("Info");
@@ -110,143 +111,194 @@ studio.protocol = (function(ProtoBuf) {
   }
   };
 
-  obj.appendBuffer = function appendBuffer( array1, array2 ) {
+  obj.appendBuffer = function ( array1, array2 ) {
     var tmp = new Uint8Array( array1.byteLength + array2.byteLength );
     tmp.set( new Uint8Array( array1 ), 0 );
     tmp.set( new Uint8Array( array2 ), array1.byteLength );
     return tmp.buffer;
   }
 
-  function ErrorHandler(){
-    this.name = "Error";
-    this.handle = function(message){
-      console.log("ProtocolError: "+message+"\n");
-      return this;
-    }.bind(this);
-  }
-
-  function ContainerHandler(onContainer, onError){
-    this.name = "Container";
-    this.handle = function(message){
-      try {
-        var container = obj.Container.decode(message);
-      } catch (err) {
-        console.log("Container Error: "+err+"\n");
-        onError();
-        return new ErrorHandler();
-      }
-      onContainer(container);
-      return this;
-    }.bind(this);
-  }
-
-  function AuthHandler(socket, hello, notificationListener, onContainer, onError){
-    this.name = "AuthResponse";
-    let cdpVersion = hello.cdp_version_major + '.' + hello.cdp_version_minor + '.' + hello.cdp_version_patch
-
-    this.sendAuthRequest = function(){
-      let request = new studio.api.Request(hello.system_name, hello.application_name, cdpVersion, hello.system_use_notification);
-      let authReq = new obj.AuthRequest();
-      let applicationAccepted = {}
-
-      if (notificationListener && notificationListener.applicationAcceptanceRequested)
-        applicationAccepted = notificationListener.applicationAcceptanceRequested(request);
-      else
-        applicationAccepted = new Promise(function(resolve, reject) { window.confirm(hello.system_use_notification) ? resolve() : reject(); });
-
-      applicationAccepted
-        .then(function(){
-          return notificationListener.credentialsRequested(request)
-        })
-        .then(function(dict){
-          let username = dict.Username;
-          let password = dict.Password;
-          var credentials = new TextEncoder().encode(username.toLowerCase() + ':' + password); // encode to utf-8 byte array
-          authReq.user_id = username.toLowerCase();
-          return crypto.subtle.digest('SHA-256', credentials.buffer)
-        })
+  obj.CreateAuthRequest = function (dict, challenge) {
+    return new Promise(function(resolve, reject) {
+      var authReq = new obj.AuthRequest();
+      var username = dict.Username || '';
+      var password = dict.Password || '';
+      var credentials = new TextEncoder().encode(username.toLowerCase() + ':' + password); // encode to utf-8 byte array
+      authReq.user_id = username.toLowerCase();
+      crypto.subtle.digest('SHA-256', credentials.buffer)
         .then(function(digest) {
-          let challenge = hello.challenge.buffer.slice(hello.challenge.offset,hello.challenge.limit);
           var colon = new Int8Array([':'.charCodeAt(0)]);
-          let buffer = obj.appendBuffer(obj.appendBuffer(challenge, colon.buffer), digest);
+          var buffer = obj.appendBuffer(obj.appendBuffer(challenge.buffer.slice(challenge.offset, challenge.limit), colon.buffer), digest);
           return crypto.subtle.digest('SHA-256', buffer)
         })
         .then(function(challenge_digest) {
-          let response = new obj.AuthRequestChallengeResponse();
+          var response = new obj.AuthRequestChallengeResponse();
           response.type = "PasswordHash";
           response.response = new Uint8Array(challenge_digest);
           authReq.challenge_response = new Array();
           authReq.challenge_response.push(response);
-          socket.send(authReq.toArrayBuffer());
+          resolve(authReq);
         })
-        .catch(function(){ 
-          console.log("Authentication cancelled.") 
+        .catch(function(err){ 
+          reject(err)
+        });
+    });
+  }
+
+  function ErrorHandler(){
+    this.name = "Error";
+    this.handle = function(message){
+      return new Promise(function(resolve, reject) {
+        console.log("ProtocolError: "+message+"\n");
+        resolve(this);
+      }.bind(this));
+    }.bind(this);
+  }
+
+  function ContainerHandler(onContainer, onError, metadata){
+    this.name = "Container";
+    this.metadata = metadata;
+    this.handle = function(message){
+      return new Promise(function(resolve, reject) {
+
+        try {
+          var container = obj.Container.decode(message);
+        } catch (err) {
+          console.log("Container Error: "+err+"\n");
+          onError();
+          resolve(new ErrorHandler());
+        }
+        onContainer(container, metadata);
+        resolve(this);
+      }.bind(this));
+    }.bind(this);
+  }
+
+  function AuthHandler(socket, metadata, credentialsRequested, onContainer, onError){
+    this.name = "AuthResponse";
+    this.metadata = metadata;
+
+    this.sendAuthRequest = function(userAuthResult){
+      var request = new studio.api.Request(this.metadata.systemName, this.metadata.applicationName, this.metadata.cdpVersion, metadata.systemUseNotification, userAuthResult);
+
+      credentialsRequested(request)
+        .then(function(dict){
+          return obj.CreateAuthRequest(dict, metadata.challenge);
+        })
+        .then(function(request){
+          socket.send(request.toArrayBuffer());
+        })
+        .catch(function(err){
+          console.log("Authentication cancelled.", err) 
         });
     }.bind(this);
 
     this.handle = function(message){
-      try {
-        var authResponse = obj.AuthResponse.decode(message);
-      } catch (err) {
-        console.log("AuthResponse Error: "+err+"\n");
-        onError();
-        return new ErrorHandler();
-      }
+      return new Promise(function(resolve, reject) {
 
-      if (authResponse.result_code == obj.AuthResponseAuthResultCode.eGranted)
-      {
-        var container = new obj.Container();
-        container.message_type = obj.ContainerType.eStructureRequest;
-        socket.send(container.toArrayBuffer());
-        return new ContainerHandler(onContainer, onError);
-      } else {
-        console.log("Auth msg:" + authResponse.result_text + "\n");
-        console.log("Unable to login with existing user, password.\n");
-        this.sendAuthRequest(/*authResponse.result_text*/);
-        return this;
-      }
+        try {
+          var authResponse = obj.AuthResponse.decode(message);
+        } catch (err) {
+          console.log("AuthResponse Error: "+err+"\n");
+          onError();
+          resolve(new ErrorHandler());
+        }
+
+        if (authResponse.result_code == obj.AuthResponseAuthResultCode.eGranted)
+        {
+          var container = new obj.Container();
+          container.message_type = obj.ContainerType.eStructureRequest;
+          socket.send(container.toArrayBuffer());
+          resolve(new ContainerHandler(onContainer, onError, metadata));
+        } else {
+          console.log("Unable to login with existing user, password.", authResponse.result_text);
+          var userAuthResult = new studio.api.UserAuthResult(authResponse.result_code, authResponse.result_text);
+          this.sendAuthRequest(userAuthResult);
+          resolve(this);
+        }
+      }.bind(this));
     }.bind(this);
   }
 
   function HelloHandler(socket, notificationListener, onContainer, onError){
     this.name = "Hello";
-    this.handle = function(message){
-      try {
-        var hello = obj.Hello.decode(message);
-      } catch (err) {
-        console.log("Hello Error: "+err+"\n");
-        onError();
-        return new ErrorHandler();
-      }
 
-      if (hello.challenge) {
-        
-        if (!notificationListener || !notificationListener.credentialsRequested)
-        {
-          console.log("No notificationListener.credentialsRequested callback provided to studio.api.Client constructor. Can't authenticate connection!");
-          return new ErrorHandler();
+    this.handle = function(message){
+      return new Promise(function(resolve, reject) {
+
+        try {
+          var hello = obj.Hello.decode(message);
+        } catch (err) {
+          console.log("Hello Error: "+err+"\n");
+          onError();
+          resolve(new ErrorHandler());
         }
 
-        let authHandler = new AuthHandler(socket, hello, notificationListener, onContainer, onError);
-        authHandler.sendAuthRequest();
-        return authHandler;
-      } else {
-        var container = new obj.Container();
-        container.message_type = obj.ContainerType.eStructureRequest;
-        socket.send(container.toArrayBuffer());
-        return new ContainerHandler(onContainer, onError);
-      }
+        function applicationAcceptanceRequested(request){
+          return new Promise(function(resolve, reject) {
+            if (request.systemUseNotification())
+              window.confirm(metadata.systemUseNotification) ? resolve() : reject();
+            else
+              resolve();
+          });
+        }
+
+        var metadata = {}
+        metadata.systemName = hello.system_name;
+        metadata.applicationName = hello.application_name;
+        metadata.cdpVersion = hello.cdp_version_major + '.' + hello.cdp_version_minor + '.' + hello.cdp_version_patch;
+        metadata.systemUseNotification = hello.system_use_notification;
+        metadata.challenge = hello.challenge;
+
+        var request = new studio.api.Request(metadata.systemName, metadata.applicationName, metadata.cdpVersion, metadata.systemUseNotification, null);
+        var applicationAccepted = {}
+
+        if (notificationListener && notificationListener.applicationAcceptanceRequested)
+          applicationAccepted = notificationListener.applicationAcceptanceRequested;
+        else
+          applicationAccepted = applicationAcceptanceRequested;
+        
+        applicationAccepted(request)
+          .then(function(){
+            if (hello.challenge) {
+              if (!notificationListener || !notificationListener.credentialsRequested)
+              {
+                console.log("No notificationListener.credentialsRequested callback provided to studio.api.Client constructor. Can't authenticate connection!");
+                resolve(new ErrorHandler());
+                return;
+              }
+
+              var authHandler = new AuthHandler(socket, metadata, notificationListener.credentialsRequested, onContainer, onError);
+              var userAuthResult = new studio.api.UserAuthResult(studio.api.CREDENTIALS_REQUIRED, 'Credentials required');
+              authHandler.sendAuthRequest(userAuthResult); 
+              resolve(authHandler);
+            }
+            else {
+              var container = new obj.Container();
+              container.message_type = obj.ContainerType.eStructureRequest;
+              socket.send(container.toArrayBuffer());
+              resolve(new ContainerHandler(onContainer, onError, metadata));
+            }
+          })
+          .catch(function(){
+            console.log("Application acceptance denied.")
+            resolve(this);
+          });
+      }.bind(this));
     };
   }
 
   obj.Handler = function(socket, notificationListener) {
     this.onContainer = undefined;
     this.onError = undefined;
-    var onContainer = function(container) {(this.onContainer && this.onContainer(container));}.bind(this);
+    var onContainer = function(container, metadata) {(this.onContainer && this.onContainer(container, metadata));}.bind(this);
     var onError = function(){(this.onError && this.onError());}.bind(this);
     var handler = new HelloHandler(socket, notificationListener, onContainer, onError);
+
     this.handle = function(message){
-      handler = handler.handle(message);
+      handler.handle(message).then(function(newHandler){
+        handler = newHandler;
+      });
     };
   };
 
@@ -306,6 +358,10 @@ studio.internal = (function(proto) {
 
     this.name = function() {
       return lastInfo.name;
+    };
+
+    this.setIsStructureFetched = function(value) {
+      structureFetched = value;
     };
 
     this.isStructureFetched = function() {
@@ -474,6 +530,7 @@ studio.internal = (function(proto) {
     var onMessage;
     var onError;
     var onOpen;
+    var reauthRequestPending = false;
     socket.binaryType = proto.BINARY_TYPE;
     nodeMap.set(systemNode.id(), systemNode);
     handler.onContainer = handleIncomingContainer;
@@ -532,7 +589,7 @@ studio.internal = (function(proto) {
       console.log("Socket close: " + reason);
 
       setTimeout(function () {
-        console.log("REconnect timer");
+        console.log("Trying to reconnect");
         socket = new WebSocket(appUrl);
         handler = new proto.Handler(socket, notificationListener);
         handler.onContainer = handleIncomingContainer;
@@ -541,6 +598,7 @@ studio.internal = (function(proto) {
         socket.onclose = onClosed;
         socket.onmessage = onMessage;
         socket.onerror = onError;
+        systemNode.setIsStructureFetched(false);
       }, 3000);
     };
 
@@ -619,6 +677,17 @@ studio.internal = (function(proto) {
       msg.message_type = proto.ContainerType.eSetterRequest;
       msg.setter_request = [request];
       send(msg);
+    };
+
+    function makeReauthRequest(dict, challenge) {
+      proto.CreateAuthRequest(dict, challenge)
+        .then(function(request){
+          var msg = new proto.Container();
+          msg.message_type = proto.ContainerType.eReauthRequest;
+          msg.re_auth_request = request;
+          send(msg);
+          reauthRequestPending = true;
+        })
     };
 
     function addChildNode(parentNode, protoNode) {
@@ -704,12 +773,37 @@ studio.internal = (function(proto) {
       }
     }
 
-    function parseErrorResponse(protoResponse) {
-      console.log("Received error response with code " + protoResponse.code
+    function reauthenticate(userAuthResult, metadata) {
+      var request = new studio.api.Request(metadata.systemName, metadata.applicationName, metadata.cdpVersion, metadata.systemUseNotification, userAuthResult);
+      notificationListener.credentialsRequested(request)
+        .then(function(dict){
+          makeReauthRequest(dict, metadata.challenge);
+        })
+        .catch(function(err){
+          console.log("Authentication failed.", err)
+        });
+    }
+
+    function parseReauthResponse(protoResponse, metadata) {
+      reauthRequestPending = false;
+      if (protoResponse.result_code != proto.AuthResponseAuthResultCode.eGranted && protoResponse.result_code != proto.AuthResponseAuthResultCode.eGrantedPasswordWillExpireSoon) {
+        var userAuthResult = new studio.api.UserAuthResult(protoResponse.result_code, protoResponse.result_text, protoResponse.additional_challenge_response_required);
+        reauthenticate(userAuthResult, metadata);
+      }
+    }
+
+    function parseErrorResponse(protoResponse, metadata) {
+      if (!reauthRequestPending && protoResponse.code == proto.RemoteErrorCode.eAUTH_RESPONSE_EXPIRED) {
+        var userAuthResult = new studio.api.UserAuthResult(studio.api.REAUTHENTICATION_REQUIRED, protoResponse.text, null);
+        metadata.challenge = protoResponse.challenge;
+        reauthenticate(userAuthResult, metadata);
+     }
+      else
+        console.log("Received error response with code " + protoResponse.code
           + ' and text: "' + protoResponse.text + '"');
     }
 
-    function handleIncomingContainer(protoContainer) {
+    function handleIncomingContainer(protoContainer, metadata) {
       switch(protoContainer.message_type){
         case proto.ContainerType.eStructureResponse:
           parseStructureResponse(protoContainer.structure_response);
@@ -722,8 +816,11 @@ studio.internal = (function(proto) {
           break;
         case proto.ContainerType.eCurrentTimeResponse:
           break;
+        case proto.ContainerType.eReauthResponse:
+          parseReauthResponse(protoContainer.re_auth_response, metadata);
+          break;
         case proto.ContainerType.eRemoteError:
-          parseErrorResponse(protoContainer.error);
+          parseErrorResponse(protoContainer.error, metadata);
         default:
           //TODO: Indicate error to Client
       }
@@ -959,7 +1056,28 @@ studio.api = (function(internal) {
 
   obj.structure = internal.structure;
 
-  obj.Request = function(systemName, applicationName, cdpVersion, systemUseNotification) {
+  obj.CREDENTIALS_REQUIRED = 0
+  obj.GRANTED = 1
+  obj.GRANTED_PASSWORD_WILL_EXPIRE_SOON = 2
+  obj.NEW_PASSWORD_REQUIRED = 10
+  obj.INVALID_CHALLENGE_RESPONSE = 11
+  obj.ADDITIONAL_RESPONSE_REQUIRED = 12
+  obj.TEMPORARILY_BLOCKED = 13
+  obj.REAUTHENTICATION_REQUIRED = 14
+
+  obj.UserAuthResult = function(code, text, additionalCredentials) {
+    this.code = function() {
+      return code;
+    }
+    this.text = function() {
+      return text;
+    }
+    this.additionalCredentials = function() {
+      return additionalCredentials;
+    }
+  }
+
+  obj.Request = function(systemName, applicationName, cdpVersion, systemUseNotification, userAuthResult) {
     this.systemName = function() {
       return systemName;
     }
@@ -971,6 +1089,9 @@ studio.api = (function(internal) {
     }
     this.systemUseNotification = function() {
       return systemUseNotification;
+    }
+    this.userAuthResult = function() {
+      return userAuthResult;
     }
   }
 
@@ -1050,4 +1171,5 @@ studio.api = (function(internal) {
 })(studio.internal);
 
 export default studio
+
 
