@@ -1,4 +1,5 @@
 import protobuf, { convertFieldsToCamelCase } from 'protobufjs'
+import p from './studioapi.proto.js';
 
 /**
  * The studio namespace.
@@ -18,7 +19,7 @@ var studio = (function() {
  */
 studio.protocol = (function(ProtoBuf) {
   var obj = {},
-        studioBuilder = ProtoBuf.loadProtoFile("./studioapi.proto");
+        studioBuilder = ProtoBuf.loadProto(p);
   obj.Hello = studioBuilder.build("Hello");
   obj.AuthRequest = studioBuilder.build("AuthRequest");
   obj.AuthRequestChallengeResponse = studioBuilder.build("AuthRequest.ChallengeResponse");

@@ -1,3 +1,4 @@
+const p = `
 // This file describes the StudioAPI wire protocol. It can be compiled with
 // the Google Protobuf protoc compiler into native C++, Java, Python etc.
 
@@ -232,4 +233,5 @@ message ValueRequest {
                                    // missing or zero means all samples must be provided
   extensions 100 to max;
 }
-
+`;
+export default p;
