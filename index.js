@@ -329,7 +329,6 @@ studio.internal = (function(proto) {
     var parent = undefined;
     var id = nodeId;
     var app = appConnection;
-    var childRequests = new Map();
     var structureFetched = false;
     var childMap = new Map();
     var givenPromises = new Map();
@@ -402,8 +401,7 @@ studio.internal = (function(proto) {
       parent = nodeParent;
       lastInfo = protoInfo;
       id = protoInfo.node_id;
-      if (valueSubscriptions.length > 0)
-        app.makeGetterRequest(id, 5, false);
+      this.async._makeGetterRequest();
     };
 
     this.add = function(node) {
@@ -446,7 +444,7 @@ studio.internal = (function(proto) {
     this.receiveValue = function (nodeValue, nodeTimestamp) {
       lastValue = nodeValue;
       for (var i = 0; i < valueSubscriptions.length; i++) {
-        valueSubscriptions[i](nodeValue, nodeTimestamp);
+        valueSubscriptions[i][0](nodeValue, nodeTimestamp);
       }
     };
 
@@ -482,24 +480,19 @@ studio.internal = (function(proto) {
       app.makeStructureRequest(id);
     };
 
-    this.async.subscribeToValues = function(valueConsumer) {
-      if (valueSubscriptions.length == 0) {
-        app.makeGetterRequest(id, 5, false);
-      }
-      valueSubscriptions.push(valueConsumer);
+    this.async.subscribeToValues = function(valueConsumer, fs, sampleRate) {
+      valueSubscriptions.push([valueConsumer, fs, sampleRate]);
+      this._makeGetterRequest();
     };
 
     this.async.unsubscribeFromValues = function(valueConsumer) {
       for (var i = 0; i < valueSubscriptions.length; i++) {
-        if (valueConsumer == valueSubscriptions[i]) {
+        if (valueConsumer == valueSubscriptions[i][0]) {
           valueSubscriptions.splice(i, 1);
           break;
         }
       }
-
-      if (valueSubscriptions.length == 0) {
-        app.makeGetterRequest(id, 0, true);
-      }
+      this._makeGetterRequest();
     };
 
     this.async.addChild = function(name, modelName) {
@@ -515,6 +508,19 @@ studio.internal = (function(proto) {
       app.makeSetterRequest(id, lastInfo.value_type, value, timestamp);
       //when offline must queue or update pending set request and call set callbacks ...???
     };
+
+    this.async._makeGetterRequest = function() {
+      if (valueSubscriptions.length > 0) {
+        var maxFs = Math.max.apply(Math, valueSubscriptions.map(v => v[1]));
+        var maxSampleRate = Math.max.apply(Math, valueSubscriptions.map(v => v[2]));
+        //by studio api protocol 0 is the highest sample rate (all samples), so override maxSampleRate if 0 is found
+        const zeroRate = valueSubscriptions.find(e => e[2] == 0);
+        maxSampleRate = zeroRate ? zeroRate[2] : maxSampleRate;
+        app.makeGetterRequest(id, maxFs, maxSampleRate, false);
+      } else {
+        app.makeGetterRequest(id, 1, 0, true);
+      }
+    }
   }
 
   obj.AppConnection = function(url, notificationListener) {
@@ -633,11 +639,14 @@ studio.internal = (function(proto) {
       send(msg);
     };
 
-    this.makeGetterRequest = function(id, fs, stop) {
+    this.makeGetterRequest = function(id, fs, sampleRate, stop) {
       var msg = new proto.Container();
       var request = new proto.ValueRequest();
       request.node_id = id;
       request.fs = fs;
+      if (sampleRate) {
+        request.sample_rate = sampleRate;
+      }
       if (stop) {
         request.stop = stop;
       }
@@ -961,9 +970,11 @@ studio.api = (function(internal) {
      * Subscribe to value changes on this node.
      *
      * @param {valueConsumer} valueConsumer
+     * @param {fs} Maximum frequency that value updates are expected (controls how many changes are sent in a single packet). Defaults to 5 hz.
+     * @param {sampleRate} Maximum amount of value updates sent per second (controls the amount of data transferred). Zero means all samples must be provided. Defaults to 0.
      */
-    this.subscribeToValues = function(valueConsumer) {
-      node.async.subscribeToValues(valueConsumer);
+    this.subscribeToValues = function(valueConsumer, fs=5, sampleRate=0) {
+      node.async.subscribeToValues(valueConsumer, fs, sampleRate);
     };
 
     /**
@@ -971,10 +982,12 @@ studio.api = (function(internal) {
      *
      * @param {string} name
      * @param {valueConsumer} valueConsumer
+     * @param {fs} Maximum frequency that value updates are expected (controls how many changes are sent in a single packet). Defaults to 5 hz.
+     * @param {sampleRate} Maximum amount of value updates sent per second (controls the amount of data transferred). Zero means all samples must be provided. Defaults to 0.
      */
-    this.subscribeToChildValues = function(name, valueConsumer) {
+    this.subscribeToChildValues = function(name, valueConsumer, fs=5, sampleRate=0) {
       instance.child(name).then(function (child) {
-        child.subscribeToValues(valueConsumer);
+        child.subscribeToValues(valueConsumer, fs, sampleRate);
       }, function (){ console.log("subscribeToChildValues() Child not found "+ name) });
     };
 
