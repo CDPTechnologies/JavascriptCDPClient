@@ -23,7 +23,7 @@ Before all examples, you need:
 
     .. code:: javascript
 
-        import studio from cdp_client
+        import studio from cdp-client
     
 Global API
 ~~~~~~~~~~
@@ -350,12 +350,16 @@ node.child(name)
           // use the load object referring to CPULoad child in current node
         }
         
-node.subscribeToValues(valueConsumer)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+node.subscribeToValues(valueConsumer, fs, sampleRate)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 - Arguments
 
     Function(value, timestamp) valueConsumer - timestamp in nanoseconds since EPOCH presented as long int
+    
+    fs - maximum frequency that value updates are expected (controls how many changes are sent in a single packet). Defaults to 5 hz.
+    
+    sampleRate - maximum amount of value updates sent per second (controls the amount of data transferred). Zero means all samples must be provided. Defaults to 0.
 
 - Usage
 
@@ -383,14 +387,18 @@ node.unsubscribeFromValues(valueConsumer)
     Unsubscribe given callback from value changes on this node.
 
 
-node.subscribeToChildValues(name, valueConsumer)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+node.subscribeToChildValues(name, valueConsumer, fs, sampleRate)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 - Arguments
 
     name
     
     Function(value, timestamp) valueConsumer - timestamp in nanoseconds since EPOCH presented as long int
+    
+    fs - maximum frequency that value updates are expected (controls how many changes are sent in a single packet). Defaults to 5 hz.
+    
+    sampleRate - maximum amount of value updates sent per second (controls the amount of data transferred). Zero means all samples must be provided. Defaults to 0.
 
 - Usage
 
