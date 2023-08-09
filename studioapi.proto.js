@@ -7,12 +7,12 @@ const p = `
 //package StudioAPI.Proto;
 
 //option optimize_for = LITE_RUNTIME;
-//option java_package = "no.icd.studioapi.proto";
+//option java_package = "com.cdptech.cdpclient.proto";
 
 /** Initial server connection response. */
 message Hello {
   required string system_name = 1;
-  required uint32 compat_version = 2 [default = 1];
+  required uint32 compat_version = 2 [default = 2];
   required uint32 incremental_version = 3 [default = 0];
   repeated bytes public_key = 4;
   optional bytes challenge = 5; // if challenge exists then server expects authentication (AuthRequest message)
@@ -79,6 +79,8 @@ message Container {
     eReauthRequest = 11;
     eReauthResponse = 12;
     eActivityNotification = 13;
+    eEventRequest = 14; // supported since compat_version=2
+    eEventResponse = 15; // supported since compat_version=2
   }
   optional Type message_type = 1;
   optional Error error = 2;
@@ -93,6 +95,8 @@ message Container {
   repeated ChildRemove child_remove_request = 11;
   optional AuthRequest re_auth_request = 12;
   optional AuthResponse re_auth_response = 13;
+  repeated EventRequest event_request = 14; // supported since compat_version=2
+  repeated EventInfo event_response = 15; // supported since compat_version=2
   extensions 100 to max;
 }
 
@@ -224,13 +228,67 @@ message VariantValue {
 
 /** Single and periodic value request message. */
 message ValueRequest {
-  required uint32 node_id = 1; // List of node IDs whose value are requested
+  required uint32 node_id = 1; // Node ID whose value is requested
   optional double fs = 2; // If present indicates that values expected no more often than provided FS rate
                           // (server will accumulate and time-stamp values if they occur more often)
   optional bool stop = 3; // If true target must stop updates on the provided values else this is start
   optional double sample_rate = 4; // If non zero indicates that values should be
                                    // sampled with given sampling rate frequency (samples/second)
                                    // missing or zero means all samples must be provided
+  extensions 100 to max;
+}
+
+/** CDP Event request message. */
+message EventRequest {
+  optional uint32 node_id = 1; // Target should forward events sent by this node ID (and its children)
+  optional uint64 starting_from = 2; // If present, target should re-forward history of past events starting from this timestamp
+  optional bool stop = 3; // If true, target must stop sending any new events, else this is subscribe request for future events
+  extensions 100 to max;
+}
+
+/** CDP Event info */
+message EventInfo {
+  enum CodeFlags {
+    eAlarmSet = 1;                  // The alarm's Set flag/state was set. The alarm changed state to "Unack-Set" (The Unack flag was set if not already set)
+    eAlarmClr = 2;                  // The alarm's Set flag was cleared. The Unack state is unchanged.
+    eAlarmAck = 4;                  // The alarm changed state from "Unacknowledged" to "Acknowledged". The Set state is unchanged.
+    eReprise = 64;                  // A repetition/update of an event that has been reported before. Courtesy of late subscribers.
+    eSourceObjectUnavailable = 256; // The provider of the event has become unavailable (disconnected or similar)
+    eNodeBoot = 1073741824;         // The provider reports that the CDPEventNode just have booted.
+  }
+  enum StatusFlags {
+    eStatusOK = 0x0;                 // No alarm set
+    eNotifySet = 0x1;                // NOTIFY alarm set
+    eWarningSet = 0x10;              // WARNING alarm set
+    eLowLevelSet = 0x20;             // LOW LEVEL alarm set
+    eHighLevelSet = 0x40;            // HIGH LEVEL alarm set
+    eErrorSet = 0x100;               // ERROR alarm set
+    eLowLowLevelSet = 0x200;         // LOW-LOW LEVEL alarm set
+    eHighHighLevelSet = 0x400;       // HIGH-HIGH LEVEL alarm set
+    eEmergencySet = 0x800;           // EMERGENCY LEVEL alarm present
+    eValueForced = 0x1000;           // Signal value was forced (overridden)
+    eRepeatBlocked = 0x2000;         // Alarm is blocked due to too many repeats
+    eProcessBlocked = 0x4000;        // Alarm is blocked by the software
+    eOperatorBlocked = 0x8000;       // Alarm is blocked by the user
+    eNotifyUnacked = 0x10000;        // NOTIFY alarm unacknowledged
+    eWarningUnacked = 0x100000;      // WARNING alarm unacknowledged
+    eErrorUnacked = 0x1000000;       // ERROR alarm unacknowledged
+    eEmergencyUnacked = 0x8000000;   // EMERGENCY alarm unacknowledged
+    eDisabled = 0x20000000;          // Alarm is disabled
+    eSignalFault = 0x40000000;       // Signal has fault condition
+    eComponentSuspended = 0x80000000;// Component is suspended
+  }
+  repeated uint32 node_id = 1; // List of node ID's (requesters) that this event relates to (is sent by it or its children)
+  optional uint64 id = 2; // system unique eventId (CDP eventId + handle)
+  optional string sender = 3; // event sender full name
+  optional uint32 code = 4; // event code flags
+  optional uint32 status = 5; // new status of the object caused event, after the event
+  optional uint64 timestamp = 6; // time stamp, when this event was sent (in UTC nanotime)
+  message EventData {
+    optional string name = 1;
+    optional string value = 2;
+  }
+  repeated EventData data = 7;
   extensions 100 to max;
 }
 `;

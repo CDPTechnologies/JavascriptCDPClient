@@ -37,6 +37,9 @@ studio.protocol = (function(ProtoBuf) {
   obj.Node = studioBuilder.build("Node");
   obj.VariantValue = studioBuilder.build("VariantValue");
   obj.ValueRequest = studioBuilder.build("ValueRequest");
+  obj.EventRequest = studioBuilder.build("EventRequest");
+  obj.EventCodeFlags = studioBuilder.build("EventInfo.CodeFlags");
+  obj.EventStatusFlags = studioBuilder.build("EventInfo.StatusFlags");
   obj.ChildAdd = studioBuilder.build("ChildAdd");
   obj.ChildRemove = studioBuilder.build("ChildRemove");
 
@@ -335,6 +338,7 @@ studio.internal = (function(proto) {
     var childIterators = new Array();
     var valueSubscriptions = new Array();
     var structureSubscriptions = new Array();
+    var eventSubscriptions = new Array();
     var lastValue;
     var lastInfo = null; //when we get this, if there are any child requests we need to fetch child fetch too
     var valid = true;
@@ -402,6 +406,8 @@ studio.internal = (function(proto) {
       lastInfo = protoInfo;
       id = protoInfo.node_id;
       this.async._makeGetterRequest();
+      for (var i = 0; i < eventSubscriptions.length; i++)
+        app.makeEventRequest(id, eventSubscriptions[i][1], false);
     };
 
     this.add = function(node) {
@@ -445,6 +451,12 @@ studio.internal = (function(proto) {
       lastValue = nodeValue;
       for (var i = 0; i < valueSubscriptions.length; i++) {
         valueSubscriptions[i][0](nodeValue, nodeTimestamp);
+      }
+    };
+
+    this.receiveEvent = function (event) {
+      for (var i = 0; i < eventSubscriptions.length; i++) {
+        eventSubscriptions[i][0](event);
       }
     };
 
@@ -493,6 +505,22 @@ studio.internal = (function(proto) {
         }
       }
       this._makeGetterRequest();
+    };
+
+    this.async.subscribeToEvents = function(eventConsumer, startingFrom) {
+      eventSubscriptions.push([eventConsumer, startingFrom]);
+      app.makeEventRequest(id, startingFrom, false);
+    };
+
+    this.async.unsubscribeFromEvents = function(eventConsumer) {
+      for (var i = 0; i < eventSubscriptions.length; i++) {
+        if (eventConsumer == eventSubscriptions[i][0]) {
+          eventSubscriptions.splice(i, 1);
+          break;
+        }
+      }
+      if (eventSubscriptions.length === 0)
+        app.makeEventRequest(id, 0, true);
     };
 
     this.async.addChild = function(name, modelName) {
@@ -655,6 +683,21 @@ studio.internal = (function(proto) {
       send(msg);
     };
 
+    this.makeEventRequest = function(id, startingFrom, stop) {
+      var msg = new proto.Container();
+      var request = new proto.EventRequest();
+      request.node_id = id;
+      if (stop) {
+        request.stop = stop;
+      }
+      if (startingFrom != undefined) {
+        request.starting_from = startingFrom;
+      }
+      msg.message_type = proto.ContainerType.eEventRequest;
+      msg.event_request = [request];
+      send(msg);
+    };
+
     this.makeChildAddRequest = function(id, name, modelName){
       var msg = new proto.Container();
       var request = new proto.ChildAdd();
@@ -783,6 +826,26 @@ studio.internal = (function(proto) {
       }
     }
 
+    function parseEventResponse(protoResponse) {
+      for (var i = 0; i < protoResponse.length; i++) {
+        var variantValue = protoResponse[i];
+        for (var j = 0; j < variantValue.node_id.length; j++) {
+          var node = nodeMap.get(variantValue.node_id[j]);
+          if (node){
+            var event = {
+              id: variantValue.id,
+              sender: variantValue.sender,
+              code: variantValue.code,
+              status: variantValue.status,
+              timestamp: variantValue.timestamp,
+              data: variantValue.data
+            };
+            node.receiveEvent(event);
+          }
+        }
+      }
+    }
+
     function reauthenticate(userAuthResult, metadata) {
       var request = new studio.api.Request(metadata.systemName, metadata.applicationName, metadata.cdpVersion, metadata.systemUseNotification, userAuthResult);
       notificationListener.credentialsRequested(request)
@@ -823,6 +886,9 @@ studio.internal = (function(proto) {
           break;
         case proto.ContainerType.eStructureChangeResponse:
           parseStructureChangeResponse(protoContainer.structure_change_response);
+          break;
+        case proto.ContainerType.eEventResponse:
+          parseEventResponse(protoContainer.event_response);
           break;
         case proto.ContainerType.eCurrentTimeResponse:
           break;
@@ -1038,6 +1104,37 @@ studio.api = (function(internal) {
       node.async.unsubscribeFromStructure(structureConsumer);
     };
 
+
+    /**
+     * Subscribe to value changes on this node.
+     *
+     * @param {valueConsumer} valueConsumer
+     * @param {fs} Maximum frequency that value updates are expected (controls how many changes are sent in a single packet). Defaults to 5 hz.
+     * @param {sampleRate} Maximum amount of value updates sent per second (controls the amount of data transferred). Zero means all samples must be provided. Defaults to 0.
+     */
+    this.subscribeToValues = function(valueConsumer, fs=5, sampleRate=0) {
+      node.async.subscribeToValues(valueConsumer, fs, sampleRate);
+    };
+    
+    /**
+     * Subscribe to events on this node.
+     *
+     * @param {eventConsumer} eventConsumer
+     * @param {startingFrom} If > 0, past events starting from this timestamp (in UTC nanotime) are re-forwarded.
+     */
+    this.subscribeToEvents = function(eventConsumer, startingFrom) {
+      node.async.subscribeToEvents(eventConsumer, startingFrom);
+    };
+
+    /**
+     * Unsubscribe given callback from events on this node.
+     *
+     * @param {eventConsumer} eventConsumer
+     */
+    this.unsubscribeFromEvents = function(eventConsumer) {
+      node.async.unsubscribeFromEvents(eventConsumer);
+    };
+        
     /**
      * Add child Node to this Node.
      *

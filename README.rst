@@ -23,7 +23,7 @@ Before all examples, you need:
 
     .. code:: javascript
 
-        import studio from cdp-client
+        import studio from "cdp-client"
     
 Global API
 ~~~~~~~~~~
@@ -161,7 +161,7 @@ client.root()
 
         client.root().then(function (system) {
           // use the system INode object to access connected structure.
-        }
+        });
 
 client.find(path)
 ^^^^^^^^^^^^^^^^^
@@ -188,7 +188,7 @@ client.find(path)
 
         client.find("MyApp.CPULoad").then(function (load) {
           // use the load object referring to CPULoad in MyApp
-        }
+        });
         
 Instance Methods / INode
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -266,7 +266,7 @@ node.info()
     |                  |                              | this flag is set to true for the application that the client  |
     |                  |                              | is connected to                                               |
     +------------------+------------------------------+---------------------------------------------------------------+
-    | Info.flags       | studio.protocol.Info.Flags   | Optional: Optional: Node flags. Any of:                       |
+    | Info.flags       | studio.protocol.Info.Flags   | Optional: Node flags. Any of:                                 |
     |                  |                              | eNone                                                         |
     |                  |                              | eNodeIsLeaf                                                   |
     |                  |                              | eValueIsPersistent                                            |
@@ -348,7 +348,7 @@ node.child(name)
 
         node.child("CPULoad").then(function (load) {
           // use the load object referring to CPULoad child in current node
-        }
+        });
         
 node.subscribeToValues(valueConsumer, fs, sampleRate)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -431,7 +431,6 @@ node.subscribeToStructure(structureConsumer)
     Subscribe to structure changes on this node. Each time child is added or removed from current node
     structureConsumer function is called with the name of the node and change argument where ADD == 1 and REMOVE == 0.
 
-
 node.unsubscribeFromStructure(structureConsumer)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -442,6 +441,82 @@ node.unsubscribeFromStructure(structureConsumer)
 - Usage
 
     Unsubscribe given callback from structure changes on this node.
+
+node.subscribeToEvents(eventConsumer, timestampFrom)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+- Arguments
+
+    Function(event) eventConsumer
+    
+    timestampFrom - If 0, then all events are passed from the start of the CDP application.
+                    If > 0, events starting from this timestamp (in UTC nanotime) are passed.
+                    If not defined, then events from the moment of subscription is passed.
+
+- Usage
+
+    Subscribe to events on this node. On each event eventConsumer function is called with Event argument described here:
+
+    +-------------------+----------------------------------+---------------------------------------------------------------------------------------------------------------------------------+
+    | Property          | Type                             | Description                                                                                                                     |
+    +===================+==================================+=================================================================================================================================+
+    | Event.id          | number                           | Optional: System unique eventId (CDP eventId + handle)                                                                          |
+    +-------------------+----------------------------------+---------------------------------------------------------------------------------------------------------------------------------+
+    | Event.sender      | string                           | Optional: Event sender full name                                                                                                |
+    +-------------------+----------------------------------+---------------------------------------------------------------------------------------------------------------------------------+
+    | Event.flags       | studio.protocol.EventCodeFlags   | Optional: Event code flags. Any of:                                                                                             |
+    |                   |                                  | eAlarmSet = 1;                  // The alarm's Set flag/state was set. The alarm changed state to "Unack-Set"                   |
+    |                   |                                  | eAlarmClr = 2;                  // The alarm's Set flag was cleared. The Unack state is unchanged.                              |
+    |                   |                                  | eAlarmAck = 4;                  // The alarm changed state from "Unacknowledged" to "Acknowledged". The Set state is unchanged. |
+    |                   |                                  | eReprise = 64;                  // A repetition/update of an event that has been reported before. Courtesy of late subscribers. |
+    |                   |                                  | eSourceObjectUnavailable = 256; // The provider of the event has become unavailable. (disconnected or similar)                  |
+    |                   |                                  | eNodeBoot = 1073741824;         // The provider reports that the CDPEventNode just have booted.                                 |
+    +-------------------+----------------------------------+---------------------------------------------------------------------------------------------------------------------------------+
+    | Event.status      | studio.protocol.EventStatusFlags | Optional: Value primitive type the node holds if node may hold a value. Any of:                                                 |
+    |                   |                                  | eStatusOK = 0x0,                 // No alarm set                                                                                |
+    |                   |                                  | eNotifySet = 0x1,                // NOTIFY alarm set                                                                            |
+    |                   |                                  | eWarningSet = 0x10,              // WARNING alarm set                                                                           |
+    |                   |                                  | eLowLevelSet = 0x20,             // LOW LEVEL alarm set                                                                         |
+    |                   |                                  | eHighLevelSet = 0x40,            // HIGH LEVEL alarm set                                                                        |
+    |                   |                                  | eErrorSet = 0x100,               // ERROR alarm set                                                                             |
+    |                   |                                  | eLowLowLevelSet = 0x200,         // LOW-LOW LEVEL alarm set                                                                     |
+    |                   |                                  | eHighHighLevelSet = 0x400,       // HIGH-HIGH LEVEL alarm set                                                                   |
+    |                   |                                  | eEmergencySet = 0x800,           // EMERGENCY LEVEL alarm present                                                               |
+    |                   |                                  | eValueForced = 0x1000,           // Signal value was forced (overridden)                                                        |
+    |                   |                                  | eRepeatBlocked = 0x2000,         // Alarm is blocked due to too many repeats                                                    |
+    |                   |                                  | eProcessBlocked = 0x4000,        // Alarm is blocked by the software                                                            |
+    |                   |                                  | eOperatorBlocked = 0x8000,       // Alarm is blocked by the user                                                                |
+    |                   |                                  | eNotifyUnacked = 0x10000,        // NOTIFY alarm unacknowledged                                                                 |
+    |                   |                                  | eWarningUnacked = 0x100000,      // WARNING alarm unacknowledged                                                                |
+    |                   |                                  | eErrorUnacked = 0x1000000,       // ERROR alarm unacknowledged                                                                  |
+    |                   |                                  | eEmergencyUnacked = 0x8000000,   // EMERGENCY alarm unacknowledged                                                              |
+    |                   |                                  | eDisabled = 0x20000000,          // Alarm is disabled                                                                           |
+    |                   |                                  | eSignalFault = 0x40000000,       // Signal has fault condition                                                                  |
+    |                   |                                  | eComponentSuspended = 0x80000000 // Component is suspended                                                                      |
+    +-------------------+----------------------------------+---------------------------------------------------------------------------------------------------------------------------------+
+    | Event.timestamp   | string                           | Optional: time stamp, when this event was sent (in UTC nanotime)                                                                |
+    +-------------------+----------------------------------+---------------------------------------------------------------------------------------------------------------------------------+
+    | Event.data        | string                           | Optional: name + value pairs                                                                                                    |
+    +-------------------+----------------------------------+---------------------------------------------------------------------------------------------------------------------------------+
+
+- Example
+
+    .. code:: javascript
+
+        node.subscribeToEvents(function (event) {
+          console.log("Event triggered by:" + event.sender);
+        });
+        
+node.unsubscribeFromEvent(eventConsumer)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+- Arguments
+
+    Function(event) eventConsumer
+
+- Usage
+
+    Unsubscribe given callback from events on this node.
 
 node.addChild(name, typeName)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
