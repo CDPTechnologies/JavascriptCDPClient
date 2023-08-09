@@ -1,6 +1,6 @@
 {
   "name": "cdp-client",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "A simple Javascript interface for the CDP Studio development platform that allows Javascript applications to interact with",
   "main": "index.js",
   "scripts": {
