@@ -139,7 +139,7 @@ studio.protocol = (function(ProtoBuf) {
           var response = new obj.AuthRequestChallengeResponse();
           response.type = "PasswordHash";
           response.response = new Uint8Array(challenge_digest);
-          authReq.challenge_response = new Array();
+          authReq.challenge_response = [];
           authReq.challenge_response.push(response);
           resolve(authReq);
         })
@@ -335,10 +335,10 @@ studio.internal = (function(proto) {
     var structureFetched = false;
     var childMap = new Map();
     var givenPromises = new Map();
-    var childIterators = new Array();
-    var valueSubscriptions = new Array();
-    var structureSubscriptions = new Array();
-    var eventSubscriptions = new Array();
+    var childIterators = [];
+    var valueSubscriptions = [];
+    var structureSubscriptions = [];
+    var eventSubscriptions = [];
     var lastValue;
     var lastInfo = null; //when we get this, if there are any child requests we need to fetch child fetch too
     var valid = true;
@@ -367,7 +367,6 @@ studio.internal = (function(proto) {
     this.setIsStructureFetched = function(value) {
       structureFetched = value;
     };
-
     this.isStructureFetched = function() {
       return structureFetched;
     };
@@ -542,7 +541,7 @@ studio.internal = (function(proto) {
         var maxFs = Math.max.apply(Math, valueSubscriptions.map(v => v[1]));
         var maxSampleRate = Math.max.apply(Math, valueSubscriptions.map(v => v[2]));
         //by studio api protocol 0 is the highest sample rate (all samples), so override maxSampleRate if 0 is found
-        const zeroRate = valueSubscriptions.find(e => e[2] == 0);
+        const zeroRate = valueSubscriptions.find(e => e[2] === 0);
         maxSampleRate = zeroRate ? zeroRate[2] : maxSampleRate;
         app.makeGetterRequest(id, maxFs, maxSampleRate, false);
       } else {
@@ -550,6 +549,169 @@ studio.internal = (function(proto) {
       }
     }
   }
+
+  obj.SystemNode = function(studioURL, notificationListener) {
+    var appConnections = [];
+    var pendingConnects = [];
+    var connected = false;
+    var connecting = false;
+    var this_ = this;
+
+    this.onAppConnect = function(url, notificationListener) {
+      return new Promise(function (resolve, reject) {
+        var appConnection = new obj.AppConnection(url, notificationListener);
+        appConnections.push(appConnection);
+        var sys = appConnection.root();
+        sys.async.onDone(resolve, reject, sys);
+      });
+    };
+
+    this.onConnect = function(resolve, reject) {
+      if (connected) {
+        resolve(this_);
+        return;
+      }
+
+      if (connecting) {
+        pendingConnects.push({resolve: resolve, reject: reject});
+        return;
+      }
+    
+      connecting = true;
+      pendingConnects.push({resolve: resolve, reject: reject});
+
+      this.onAppConnect(studioURL, notificationListener).then(function(system){
+        var promises = [];
+        system.forEachChild(function (app) {
+          if (!app.info().is_local)
+          {
+            var appUrl = app.info().server_addr + ":" + app.info().server_port;
+            promises.push(this_.onAppConnect(appUrl, notificationListener));
+          }
+        });
+        Promise.all(promises).then(function() {
+          pendingConnects.forEach(function(con) {
+            con.resolve(this_);
+          });
+          pendingConnects = [];
+          connecting = false;
+          connected = true;
+        });
+      }, reject);
+    }
+
+    this.applicationNodes = function() {
+      var nodes = [];
+      appConnections.forEach(function(con) {
+        con.root().forEachChild(function(app) {
+          if (app.info().is_local)
+            nodes.push(app);
+        });
+      });
+      return nodes;
+    }
+
+    this.isValid = function() {
+      return true;
+    }
+
+    this.name = function() {
+      return appConnections[0].root().name();
+    };
+
+    this.info = function() {
+      return appConnections[0].root().info();
+    };
+
+    this.lastValue = function() {
+      return appConnections[0].root().lastValue();
+    };
+
+    this.child = function(name) {
+      return this.applicationNodes().find(function (app) {
+        return app.name() === name;
+      });
+    }
+
+    this.isStructureFetched = function() {
+      return true;
+    }
+
+    this.forEachChild = function(iteratorFunction) {
+      this.applicationNodes().forEach(function (app) {
+        iteratorFunction(app);
+      });
+    };
+
+    this.async = {};
+
+    this.async.fetch = function() {
+      this.applicationNodes().forEach(function (app) {
+        pendingFetches.push(app);
+        app.fetch();
+      });
+    };
+
+    this.async.onDone = function(resolve, reject, apiNode) {
+      const index = pendingFetches.indexOf(apiNode);
+      if (index > -1) {
+        pendingFetches[index].onDone(resolve, reject, apiNode);
+        pendingFetches.splice(index, 1);
+      } 
+    };
+
+    this.async.subscribeToValues = function(valueConsumer, fs=5, sampleRate=0) {
+
+    };
+
+    this.async.subscribeToChildValues = function(name, valueConsumer, fs=5, sampleRate=0) {
+
+    };
+
+    this.async.unsubscribeFromValues = function(valueConsumer) {
+
+    };
+
+    this.async.unsubscribeFromChildValues = function(name, valueConsumer) {
+
+    };
+
+    this.async.subscribeToStructure = function(structureConsumer) {
+      this.applicationNodes().forEach(function (app) {
+        app.subscribeToStructure(structureConsumer);
+      });
+    };
+
+    this.async.unsubscribeFromStructure = function(structureConsumer) {
+      this.applicationNodes().forEach(function (app) {
+        app.unsubscribeFromStructure(structureConsumer);
+      });
+    };
+
+    this.async.subscribeToEvents = function(eventConsumer, startingFrom) {
+      this.applicationNodes().forEach(function (app) {
+        app.subscribeToEvents(eventConsumer, startingFrom);
+      });
+    };
+
+    this.async.unsubscribeFromEvents = function(eventConsumer) {
+      this.applicationNodes().forEach(function (app) {
+        app.unsubscribeFromEvents(eventConsumer);
+      });
+    };
+
+    this.async.addChild = function(name, modelName) {
+
+    };
+
+    this.async.removeChild = function(name) {
+
+    };
+
+    this.async.setValue = function(value, timestamp) {
+
+    };
+  };
 
   obj.AppConnection = function(url, notificationListener) {
     var appConnection = this;
@@ -661,7 +823,7 @@ studio.internal = (function(proto) {
       var msg = new proto.Container();
       msg.message_type = proto.ContainerType.eStructureRequest;
       if (id != proto.SYSTEM_NODE_ID) {
-        msg.structure_request = new Array();
+        msg.structure_request = [];
         msg.structure_request.push(id);
       }
       send(msg);
@@ -906,7 +1068,6 @@ studio.internal = (function(proto) {
 
   return obj;
 })(studio.protocol);
-
 
 /**
  * The studio.api namespace.
@@ -1216,7 +1377,7 @@ studio.api = (function(internal) {
    * @constructor
    */
   obj.Client = function(studioURL, notificationListener) {
-    var appConnection = new internal.AppConnection(studioURL, notificationListener);
+    var system = new internal.SystemNode(studioURL, notificationListener);
 
     /**
      * Request root node.
@@ -1225,8 +1386,9 @@ studio.api = (function(internal) {
      */
     this.root = function(){
       return new Promise(function(resolve, reject) {
-        var node = appConnection.root();
-        node.async.onDone(resolve, reject, new INode(node));
+        system.onConnect(function(system){
+          resolve(new INode(system));
+        }, reject);
       });
     };
 

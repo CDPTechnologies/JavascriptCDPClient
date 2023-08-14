@@ -152,8 +152,7 @@ client.root()
 - Usage
 
     Wait for root INode object to be available from connected application. The root node is
-    the top-level "system" node that contains the application connected to as local application and
-    information about other applications visible on the network.
+    the top-level "system" node that contains the connected applications.
     
 - Example
 
