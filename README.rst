@@ -76,6 +76,67 @@ request.systemUseNotification()
 
     System use notification message to ask for confirmation to continue.
 
+request.userAuthResult()
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+- Returns
+
+    Authentication response if security is enabled.
+
+
+studio.api.UserAuthResult(code, text, additionalCredentials)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+- Arguments
+
+    code - response code.
+
+    text - response info/error.
+      
+    additionalCredentials - Returns additional credentials if required by received response code.
+      
+- Returns
+
+    The created UserAuthResult object.
+
+Instance Methods / UserAuthResult
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+result.code()
+^^^^^^^^^^^^^
+
+- Returns
+
+    Authentication response code.
+    
+    +---------------------------------+------------------------------------------------------------------------------------------------------------------+
+    | Type                            | Description                                                                                                      |
+    +=================================+==================================================================================================================+
+    | studio.protocol.AuthResultCode  | Optional: One of the following:                                                                                  |
+    |                                 | eCredentialsRequired                                                                                             |
+    |                                 | eGranted                                                                                                         |
+    |                                 | eGrantedPasswordWillExpireSoon // expiry timestamp is provided by text()                                         |
+    |                                 | eNewPasswordRequired // AuthRequest with additional response with new username + password hash is required       | 
+    |                                 | eInvalidChallengeResponse // challenge response sent was invalid                                                 |
+    |                                 | eAdditionalResponseRequired // additional challenge responses based on additional credential types are required. |
+    |                                 | eTemporarilyBlocked // authentication is temporarily blocked because of too many failed attempts                 |
+    |                                 | eNodeIseReauthenticationRequiredInternal // server requires re-authentication (e.g. because of being idle)       |
+    |                                 |                                          // implementation should prompt the user for re-authentication          |
+    +---------------------------------+------------------------------------------------------------------------------------------------------------------+
+
+result.text()
+^^^^^^^^^^^^^
+
+- Returns
+
+    Authentication error or info in text representation.
+
+result.additionalCredentials()
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+- Returns
+
+    Returns additional credentials if required.
 
 studio.api.Client(uri, notificationListener)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -124,11 +185,11 @@ studio.api.Client(uri, notificationListener)
 
           credentialsRequested(request) {
             return new Promise(function(resolve, reject) {
-              if (request.userAuthResult().code() == studio.api.CREDENTIALS_REQUIRED) {
+              if (request.userAuthResult().code() == studio.protocol.AuthResultCode.eCredentialsRequired) {
                 // Do something to gather username and password variables (either sync or async way) and then call:
                 resolve({Username: "cdpuser", Password: "cdpuser"});
               }
-              if (request.userAuthResult().code() == studio.api.REAUTHENTICATIONREQUIRED) {
+              if (request.userAuthResult().code() == studio.protocol.AuthResultCode.eReauthenticationRequired) {
                 // Pop user a message that idle lockout was happened and server requires new authentication to continue:
                 resolve({Username: "cdpuser", Password: "cdpuser"});
               }
@@ -456,47 +517,47 @@ node.subscribeToEvents(eventConsumer, timestampFrom)
 
     Subscribe to events on this node. On each event eventConsumer function is called with Event argument described here:
 
-    +-------------------+----------------------------------+---------------------------------------------------------------------------------------------------------------------------------+
-    | Property          | Type                             | Description                                                                                                                     |
-    +===================+==================================+=================================================================================================================================+
-    | Event.id          | number                           | Optional: System unique eventId (CDP eventId + handle)                                                                          |
-    +-------------------+----------------------------------+---------------------------------------------------------------------------------------------------------------------------------+
-    | Event.sender      | string                           | Optional: Event sender full name                                                                                                |
-    +-------------------+----------------------------------+---------------------------------------------------------------------------------------------------------------------------------+
-    | Event.flags       | studio.protocol.EventCodeFlags   | Optional: Event code flags. Any of:                                                                                             |
-    |                   |                                  | eAlarmSet = 1;                  // The alarm's Set flag/state was set. The alarm changed state to "Unack-Set"                   |
-    |                   |                                  | eAlarmClr = 2;                  // The alarm's Set flag was cleared. The Unack state is unchanged.                              |
-    |                   |                                  | eAlarmAck = 4;                  // The alarm changed state from "Unacknowledged" to "Acknowledged". The Set state is unchanged. |
-    |                   |                                  | eReprise = 64;                  // A repetition/update of an event that has been reported before. Courtesy of late subscribers. |
-    |                   |                                  | eSourceObjectUnavailable = 256; // The provider of the event has become unavailable. (disconnected or similar)                  |
-    |                   |                                  | eNodeBoot = 1073741824;         // The provider reports that the CDPEventNode just have booted.                                 |
-    +-------------------+----------------------------------+---------------------------------------------------------------------------------------------------------------------------------+
-    | Event.status      | studio.protocol.EventStatusFlags | Optional: Value primitive type the node holds if node may hold a value. Any of:                                                 |
-    |                   |                                  | eStatusOK = 0x0,                 // No alarm set                                                                                |
-    |                   |                                  | eNotifySet = 0x1,                // NOTIFY alarm set                                                                            |
-    |                   |                                  | eWarningSet = 0x10,              // WARNING alarm set                                                                           |
-    |                   |                                  | eLowLevelSet = 0x20,             // LOW LEVEL alarm set                                                                         |
-    |                   |                                  | eHighLevelSet = 0x40,            // HIGH LEVEL alarm set                                                                        |
-    |                   |                                  | eErrorSet = 0x100,               // ERROR alarm set                                                                             |
-    |                   |                                  | eLowLowLevelSet = 0x200,         // LOW-LOW LEVEL alarm set                                                                     |
-    |                   |                                  | eHighHighLevelSet = 0x400,       // HIGH-HIGH LEVEL alarm set                                                                   |
-    |                   |                                  | eEmergencySet = 0x800,           // EMERGENCY LEVEL alarm present                                                               |
-    |                   |                                  | eValueForced = 0x1000,           // Signal value was forced (overridden)                                                        |
-    |                   |                                  | eRepeatBlocked = 0x2000,         // Alarm is blocked due to too many repeats                                                    |
-    |                   |                                  | eProcessBlocked = 0x4000,        // Alarm is blocked by the software                                                            |
-    |                   |                                  | eOperatorBlocked = 0x8000,       // Alarm is blocked by the user                                                                |
-    |                   |                                  | eNotifyUnacked = 0x10000,        // NOTIFY alarm unacknowledged                                                                 |
-    |                   |                                  | eWarningUnacked = 0x100000,      // WARNING alarm unacknowledged                                                                |
-    |                   |                                  | eErrorUnacked = 0x1000000,       // ERROR alarm unacknowledged                                                                  |
-    |                   |                                  | eEmergencyUnacked = 0x8000000,   // EMERGENCY alarm unacknowledged                                                              |
-    |                   |                                  | eDisabled = 0x20000000,          // Alarm is disabled                                                                           |
-    |                   |                                  | eSignalFault = 0x40000000,       // Signal has fault condition                                                                  |
-    |                   |                                  | eComponentSuspended = 0x80000000 // Component is suspended                                                                      |
-    +-------------------+----------------------------------+---------------------------------------------------------------------------------------------------------------------------------+
-    | Event.timestamp   | string                           | Optional: time stamp, when this event was sent (in UTC nanotime)                                                                |
-    +-------------------+----------------------------------+---------------------------------------------------------------------------------------------------------------------------------+
-    | Event.data        | string                           | Optional: name + value pairs                                                                                                    |
-    +-------------------+----------------------------------+---------------------------------------------------------------------------------------------------------------------------------+
+    +-------------------+-----------------------------+---------------------------------------------------------------------------------------------------------------------------------+
+    | Property          | Type                        | Description                                                                                                                     |
+    +===================+=============================+=================================================================================================================================+
+    | Event.id          | number                      | Optional: System unique eventId (CDP eventId + handle)                                                                          |
+    +-------------------+-----------------------------+---------------------------------------------------------------------------------------------------------------------------------+
+    | Event.sender      | string                      | Optional: Event sender full name                                                                                                |
+    +-------------------+-----------------------------+---------------------------------------------------------------------------------------------------------------------------------+
+    | Event.code        | studio.protocol.EventCode   | Optional: Event code flags. Any of:                                                                                             |
+    |                   |                             | eAlarmSet = 1;                  // The alarm's Set flag/state was set. The alarm changed state to "Unack-Set"                   |
+    |                   |                             | eAlarmClr = 2;                  // The alarm's Set flag was cleared. The Unack state is unchanged.                              |
+    |                   |                             | eAlarmAck = 4;                  // The alarm changed state from "Unacknowledged" to "Acknowledged". The Set state is unchanged. |
+    |                   |                             | eReprise = 64;                  // A repetition/update of an event that has been reported before. Courtesy of late subscribers. |
+    |                   |                             | eSourceObjectUnavailable = 256; // The provider of the event has become unavailable. (disconnected or similar)                  |
+    |                   |                             | eNodeBoot = 1073741824;         // The provider reports that the CDPEventNode just have booted.                                 |
+    +-------------------+-----------------------------+---------------------------------------------------------------------------------------------------------------------------------+
+    | Event.status      | studio.protocol.EventStatus | Optional: Value primitive type the node holds if node may hold a value. Any of:                                                 |
+    |                   |                             | eStatusOK = 0x0,                 // No alarm set                                                                                |
+    |                   |                             | eNotifySet = 0x1,                // NOTIFY alarm set                                                                            |
+    |                   |                             | eWarningSet = 0x10,              // WARNING alarm set                                                                           |
+    |                   |                             | eLowLevelSet = 0x20,             // LOW LEVEL alarm set                                                                         |
+    |                   |                             | eHighLevelSet = 0x40,            // HIGH LEVEL alarm set                                                                        |
+    |                   |                             | eErrorSet = 0x100,               // ERROR alarm set                                                                             |
+    |                   |                             | eLowLowLevelSet = 0x200,         // LOW-LOW LEVEL alarm set                                                                     |
+    |                   |                             | eHighHighLevelSet = 0x400,       // HIGH-HIGH LEVEL alarm set                                                                   |
+    |                   |                             | eEmergencySet = 0x800,           // EMERGENCY LEVEL alarm present                                                               |
+    |                   |                             | eValueForced = 0x1000,           // Signal value was forced (overridden)                                                        |
+    |                   |                             | eRepeatBlocked = 0x2000,         // Alarm is blocked due to too many repeats                                                    |
+    |                   |                             | eProcessBlocked = 0x4000,        // Alarm is blocked by the software                                                            |
+    |                   |                             | eOperatorBlocked = 0x8000,       // Alarm is blocked by the user                                                                |
+    |                   |                             | eNotifyUnacked = 0x10000,        // NOTIFY alarm unacknowledged                                                                 |
+    |                   |                             | eWarningUnacked = 0x100000,      // WARNING alarm unacknowledged                                                                |
+    |                   |                             | eErrorUnacked = 0x1000000,       // ERROR alarm unacknowledged                                                                  |
+    |                   |                             | eEmergencyUnacked = 0x8000000,   // EMERGENCY alarm unacknowledged                                                              |
+    |                   |                             | eDisabled = 0x20000000,          // Alarm is disabled                                                                           |
+    |                   |                             | eSignalFault = 0x40000000,       // Signal has fault condition                                                                  |
+    |                   |                             | eComponentSuspended = 0x80000000 // Component is suspended                                                                      |
+    +-------------------+-----------------------------+---------------------------------------------------------------------------------------------------------------------------------+
+    | Event.timestamp   | string                      | Optional: time stamp, when this event was sent (in UTC nanotime)                                                                |
+    +-------------------+-----------------------------+---------------------------------------------------------------------------------------------------------------------------------+
+    | Event.data        | string                      | Optional: name + value pairs                                                                                                    |
+    +-------------------+-----------------------------+---------------------------------------------------------------------------------------------------------------------------------+
 
 - Example
 

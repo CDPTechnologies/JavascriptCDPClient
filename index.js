@@ -25,7 +25,7 @@ studio.protocol = (function(ProtoBuf) {
   obj.AuthRequestChallengeResponse = studioBuilder.build("AuthRequest.ChallengeResponse");
   obj.AdditionalChallengeResponseRequired = studioBuilder.build("AdditionalChallengeResponseRequired");
   obj.AuthResponse = studioBuilder.build("AuthResponse");
-  obj.AuthResponseAuthResultCode = studioBuilder.build("AuthResponse.AuthResultCode");
+  obj.AuthResultCode = studioBuilder.build("AuthResponse.AuthResultCode");
   obj.Container = studioBuilder.build("Container");
   obj.ContainerType = studioBuilder.build("Container.Type");
   obj.Error = studioBuilder.build("Error");
@@ -38,8 +38,9 @@ studio.protocol = (function(ProtoBuf) {
   obj.VariantValue = studioBuilder.build("VariantValue");
   obj.ValueRequest = studioBuilder.build("ValueRequest");
   obj.EventRequest = studioBuilder.build("EventRequest");
-  obj.EventCodeFlags = studioBuilder.build("EventInfo.CodeFlags");
-  obj.EventStatusFlags = studioBuilder.build("EventInfo.StatusFlags");
+  obj.EventInfo = studioBuilder.build("EventInfo");
+  obj.EventCode = studioBuilder.build("EventInfo.CodeFlags");
+  obj.EventStatus = studioBuilder.build("EventInfo.StatusFlags");
   obj.ChildAdd = studioBuilder.build("ChildAdd");
   obj.ChildRemove = studioBuilder.build("ChildRemove");
 
@@ -208,7 +209,7 @@ studio.protocol = (function(ProtoBuf) {
           resolve(new ErrorHandler());
         }
 
-        if (authResponse.result_code == obj.AuthResponseAuthResultCode.eGranted)
+        if (authResponse.result_code == obj.AuthResultCode.eGranted)
         {
           var container = new obj.Container();
           container.message_type = obj.ContainerType.eStructureRequest;
@@ -273,7 +274,7 @@ studio.protocol = (function(ProtoBuf) {
               }
 
               var authHandler = new AuthHandler(socket, metadata, notificationListener.credentialsRequested, onContainer, onError);
-              var userAuthResult = new studio.api.UserAuthResult(studio.api.CREDENTIALS_REQUIRED, 'Credentials required');
+              var userAuthResult = new studio.api.UserAuthResult(obj.AuthResultCode.eCredentialsRequired, 'Credentials required');
               authHandler.sendAuthRequest(userAuthResult); 
               resolve(authHandler);
             }
@@ -367,6 +368,7 @@ studio.internal = (function(proto) {
     this.setIsStructureFetched = function(value) {
       structureFetched = value;
     };
+    
     this.isStructureFetched = function() {
       return structureFetched;
     };
@@ -1021,7 +1023,7 @@ studio.internal = (function(proto) {
 
     function parseReauthResponse(protoResponse, metadata) {
       reauthRequestPending = false;
-      if (protoResponse.result_code != proto.AuthResponseAuthResultCode.eGranted && protoResponse.result_code != proto.AuthResponseAuthResultCode.eGrantedPasswordWillExpireSoon) {
+      if (protoResponse.result_code != proto.AuthResultCode.eGranted && protoResponse.result_code != proto.AuthResultCode.eGrantedPasswordWillExpireSoon) {
         var userAuthResult = new studio.api.UserAuthResult(protoResponse.result_code, protoResponse.result_text, protoResponse.additional_challenge_response_required);
         reauthenticate(userAuthResult, metadata);
       }
@@ -1029,7 +1031,7 @@ studio.internal = (function(proto) {
 
     function parseErrorResponse(protoResponse, metadata) {
       if (!reauthRequestPending && protoResponse.code == proto.RemoteErrorCode.eAUTH_RESPONSE_EXPIRED) {
-        var userAuthResult = new studio.api.UserAuthResult(studio.api.REAUTHENTICATION_REQUIRED, protoResponse.text, null);
+        var userAuthResult = new studio.api.UserAuthResult(proto.AuthResultCode.eReauthenticationRequired, protoResponse.text, null);
         metadata.challenge = protoResponse.challenge;
         reauthenticate(userAuthResult, metadata);
      }
@@ -1327,15 +1329,6 @@ studio.api = (function(internal) {
   }
 
   obj.structure = internal.structure;
-
-  obj.CREDENTIALS_REQUIRED = 0
-  obj.GRANTED = 1
-  obj.GRANTED_PASSWORD_WILL_EXPIRE_SOON = 2
-  obj.NEW_PASSWORD_REQUIRED = 10
-  obj.INVALID_CHALLENGE_RESPONSE = 11
-  obj.ADDITIONAL_RESPONSE_REQUIRED = 12
-  obj.TEMPORARILY_BLOCKED = 13
-  obj.REAUTHENTICATION_REQUIRED = 14
 
   obj.UserAuthResult = function(code, text, additionalCredentials) {
     this.code = function() {

@@ -47,7 +47,7 @@ message AdditionalChallengeResponseRequired {
 /** Sent by server as a response to a AuthRequest. */
 message AuthResponse {
   enum AuthResultCode {
-    eUnknown = 0;
+    eCredentialsRequired = 0;
     eGranted = 1;
     eGrantedPasswordWillExpireSoon = 2; // expiry timestamp is provided in result_text
     eNewPasswordRequired = 10; // AuthRequest with additional response with new username + password hash is required
