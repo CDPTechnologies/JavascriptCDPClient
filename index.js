@@ -365,10 +365,6 @@ studio.internal = (function(proto) {
       return lastInfo.name;
     };
 
-    this.setIsStructureFetched = function(value) {
-      structureFetched = value;
-    };
-    
     this.isStructureFetched = function() {
       return structureFetched;
     };
@@ -788,7 +784,7 @@ studio.internal = (function(proto) {
       console.log("Socket close: " + reason);
 
       setTimeout(function () {
-        console.log("Trying to reconnect");
+        console.log("Trying to reconnect", appUrl);
         socket = new WebSocket(appUrl);
         handler = new proto.Handler(socket, notificationListener);
         handler.onContainer = handleIncomingContainer;
@@ -797,7 +793,6 @@ studio.internal = (function(proto) {
         socket.onclose = onClosed;
         socket.onmessage = onMessage;
         socket.onerror = onError;
-        systemNode.setIsStructureFetched(false);
       }, 3000);
     };
 
