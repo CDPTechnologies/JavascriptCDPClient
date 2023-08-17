@@ -1155,7 +1155,7 @@ studio.api = (function(internal) {
                 resolve(iNode);
               }
             } else {
-              reject();
+              reject("Child named '" + name + "' not found");
             }
           } else {
             node.async.fetch();
@@ -1170,14 +1170,14 @@ studio.api = (function(internal) {
                   resolve(iNode);
                 }
               } else {
-                reject();
+                reject("Child named '" + name + "' not found");
               }
             }, reject, new INode(node))
           }
         });
       } else {
         return new Promise(function (resolve, reject) {
-          reject();
+          reject("Child named '" + name + "' not found. Parent node is invalid");
         });
       }
     };
@@ -1407,10 +1407,9 @@ studio.api = (function(internal) {
                 return node.child(nodeName);
               },
               function() {
-                console.log("find() Child not found " + path);
                 delete nodes[path];
                 delete memoize[path];
-                return new Promise(function(resolve, reject) { reject(); });
+                return new Promise(function(resolve, reject) { reject("Child not found: " + path); });
               });
       }
       return f;

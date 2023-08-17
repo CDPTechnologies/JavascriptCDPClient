@@ -109,20 +109,27 @@ result.code()
 
     Authentication response code.
     
-    +---------------------------------+------------------------------------------------------------------------------------------------------------------+
-    | Type                            | Description                                                                                                      |
-    +=================================+==================================================================================================================+
-    | studio.protocol.AuthResultCode  | Optional: One of the following:                                                                                  |
-    |                                 | eCredentialsRequired                                                                                             |
-    |                                 | eGranted                                                                                                         |
-    |                                 | eGrantedPasswordWillExpireSoon // expiry timestamp is provided by text()                                         |
-    |                                 | eNewPasswordRequired // AuthRequest with additional response with new username + password hash is required       | 
-    |                                 | eInvalidChallengeResponse // challenge response sent was invalid                                                 |
-    |                                 | eAdditionalResponseRequired // additional challenge responses based on additional credential types are required. |
-    |                                 | eTemporarilyBlocked // authentication is temporarily blocked because of too many failed attempts                 |
-    |                                 | eNodeIseReauthenticationRequiredInternal // server requires re-authentication (e.g. because of being idle)       |
-    |                                 |                                          // implementation should prompt the user for re-authentication          |
-    +---------------------------------+------------------------------------------------------------------------------------------------------------------+
+    +---------------------------------+----------------------------------------------+---------------------------------------------------------------------------------------+
+    | Type                            | Value                                        | Description                                                                           |
+    +=================================+==============================================+=======================================================================================+
+    | studio.protocol.AuthResultCode  | Optional: One of the following:                                                                                                      |
+    +                                 +----------------------------------------------+---------------------------------------------------------------------------------------+
+    |                                 | - eCredentialsRequired                       |                                                                                       |
+    +                                 +----------------------------------------------+---------------------------------------------------------------------------------------+
+    |                                 | - eGranted                                   |                                                                                       |
+    +                                 +----------------------------------------------+---------------------------------------------------------------------------------------+
+    |                                 | - eGrantedPasswordWillExpireSoon             | expiry timestamp is provided by text()                                                |
+    +                                 +----------------------------------------------+---------------------------------------------------------------------------------------+
+    |                                 | - eNewPasswordRequired                       | AuthRequest with additional response with new username + password hash is required    |
+    +                                 +----------------------------------------------+---------------------------------------------------------------------------------------+ 
+    |                                 | - eInvalidChallengeResponse                  | challenge response sent was invalid                                                   |
+    +                                 +----------------------------------------------+---------------------------------------------------------------------------------------+
+    |                                 | - eAdditionalResponseRequired                | additional challenge responses based on additional credential types are required.     |
+    +                                 +----------------------------------------------+---------------------------------------------------------------------------------------+
+    |                                 | - eTemporarilyBlocked                        | authentication is temporarily blocked because of too many failed attempts             |
+    +                                 +----------------------------------------------+---------------------------------------------------------------------------------------+
+    |                                 | - eNodeIseReauthenticationRequiredInternal   | server requires re-authentication (e.g. because of being idle)                        |
+    +---------------------------------+----------------------------------------------+---------------------------------------------------------------------------------------+
 
 result.text()
 ^^^^^^^^^^^^^
@@ -136,7 +143,19 @@ result.additionalCredentials()
 
 - Returns
 
-    Returns additional credentials if required.
+    Additional credentials in following structure:
+
+    .. code:: none
+         
+        returns {
+            string type;
+            string prompt;
+            Parameter {
+                string name;
+                string value;
+            }
+            Parameter parameter = [];
+        }
 
 studio.api.Client(uri, notificationListener)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -285,34 +304,34 @@ node.info()
     +------------------+------------------------------+---------------------------------------------------------------+
     | Info.name        | string                       | Nodes short name                                              |
     +------------------+------------------------------+---------------------------------------------------------------+
-    | Info.node_type   | studio.protocol.CDPNodeType  | Direct CDP base type of the class. One of the following:      |
-    |                  |                              | CDP_UNDEFINED                                                 |
-    |                  |                              | CDP_APPLICATION                                               |
-    |                  |                              | CDP_COMPONENT                                                 |
-    |                  |                              | CDP_OBJECT                                                    |
-    |                  |                              | CDP_MESSAGE                                                   |
-    |                  |                              | CDP_BASE_OBJECT                                               |
-    |                  |                              | CDP_PROPERTY                                                  |
-    |                  |                              | CDP_SETTING                                                   |
-    |                  |                              | CDP_ENUM                                                      |
-    |                  |                              | CDP_OPERATOR                                                  |
-    |                  |                              | CDP_NODE                                                      |
+    | Info.node_type   | studio.protocol.CDPNodeType  | | Direct CDP base type of the class. One of the following:    |
+    |                  |                              | - CDP_UNDEFINED                                               |
+    |                  |                              | - CDP_APPLICATION                                             |
+    |                  |                              | - CDP_COMPONENT                                               |
+    |                  |                              | - CDP_OBJECT                                                  |
+    |                  |                              | - CDP_MESSAGE                                                 |
+    |                  |                              | - CDP_BASE_OBJECT                                             |
+    |                  |                              | - CDP_PROPERTY                                                |
+    |                  |                              | - CDP_SETTING                                                 |
+    |                  |                              | - CDP_ENUM                                                    |
+    |                  |                              | - CDP_OPERATOR                                                |
+    |                  |                              | - CDP_NODE                                                    |
     +------------------+------------------------------+---------------------------------------------------------------+
-    | Info.value_type  | studio.protocol.CDPValueType | Optional: Value primitive type the node holds                 |
-    |                  |                              | if node may hold a value. One of the following:               |
-    |                  |                              | eUNDEFINED                                                    |
-    |                  |                              | eDOUBLE                                                       |
-    |                  |                              | eUINT64                                                       |
-    |                  |                              | eINT64                                                        |
-    |                  |                              | eFLOAT                                                        |
-    |                  |                              | eUINT                                                         |
-    |                  |                              | eINT                                                          |
-    |                  |                              | eUSHORT                                                       |
-    |                  |                              | eSHORT                                                        |
-    |                  |                              | eUCHAR                                                        |
-    |                  |                              | eCHAR                                                         |
-    |                  |                              | eBOOL                                                         |
-    |                  |                              | eSTRING                                                       |
+    | Info.value_type  | studio.protocol.CDPValueType | | Optional: Value primitive type the node holds               |
+    |                  |                              | | if node may hold a value. One of the following:             |
+    |                  |                              | - eUNDEFINED                                                  |
+    |                  |                              | - eDOUBLE                                                     |
+    |                  |                              | - eUINT64                                                     |
+    |                  |                              | - eINT64                                                      |
+    |                  |                              | - eFLOAT                                                      |
+    |                  |                              | - eUINT                                                       |
+    |                  |                              | - eINT                                                        |
+    |                  |                              | - eUSHORT                                                     |
+    |                  |                              | - eSHORT                                                      |
+    |                  |                              | - eUCHAR                                                      |
+    |                  |                              | - eCHAR                                                       |
+    |                  |                              | - eBOOL                                                       |
+    |                  |                              | - eSTRING                                                     |
     +------------------+------------------------------+---------------------------------------------------------------+
     | Info.type_name   | string                       | Optional: Class name of the reflected node                    |
     +------------------+------------------------------+---------------------------------------------------------------+
@@ -326,16 +345,16 @@ node.info()
     |                  |                              | this flag is set to true for the application that the client  |
     |                  |                              | is connected to                                               |
     +------------------+------------------------------+---------------------------------------------------------------+
-    | Info.flags       | studio.protocol.Info.Flags   | Optional: Node flags. Any of:                                 |
-    |                  |                              | eNone                                                         |
-    |                  |                              | eNodeIsLeaf                                                   |
-    |                  |                              | eValueIsPersistent                                            |
-    |                  |                              | eValueIsReadOnly                                              |
-    |                  |                              | eNodeIsRemovable                                              |
-    |                  |                              | eNodeCanAddChildren                                           |
-    |                  |                              | eNodeIsRenamable                                              |
-    |                  |                              | eNodeIsInternal                                               |
-    |                  |                              | eNodeIsImportant                                              |
+    | Info.flags       | studio.protocol.Info.Flags   | | Optional: Node flags. Any of:                               |
+    |                  |                              | - eNone                                                       |
+    |                  |                              | - eNodeIsLeaf                                                 |
+    |                  |                              | - eValueIsPersistent                                          |
+    |                  |                              | - eValueIsReadOnly                                            |
+    |                  |                              | - eNodeIsRemovable                                            |
+    |                  |                              | - eNodeCanAddChildren                                         |
+    |                  |                              | - eNodeIsRenamable                                            |
+    |                  |                              | - eNodeIsInternal                                             |
+    |                  |                              | - eNodeIsImportant                                            |
     +------------------+------------------------------+---------------------------------------------------------------+
 
 node.lastValue()
@@ -517,47 +536,73 @@ node.subscribeToEvents(eventConsumer, timestampFrom)
 
     Subscribe to events on this node. On each event eventConsumer function is called with Event argument described here:
 
-    +-------------------+-----------------------------+---------------------------------------------------------------------------------------------------------------------------------+
-    | Property          | Type                        | Description                                                                                                                     |
-    +===================+=============================+=================================================================================================================================+
-    | Event.id          | number                      | Optional: System unique eventId (CDP eventId + handle)                                                                          |
-    +-------------------+-----------------------------+---------------------------------------------------------------------------------------------------------------------------------+
-    | Event.sender      | string                      | Optional: Event sender full name                                                                                                |
-    +-------------------+-----------------------------+---------------------------------------------------------------------------------------------------------------------------------+
-    | Event.code        | studio.protocol.EventCode   | Optional: Event code flags. Any of:                                                                                             |
-    |                   |                             | eAlarmSet = 1;                  // The alarm's Set flag/state was set. The alarm changed state to "Unack-Set"                   |
-    |                   |                             | eAlarmClr = 2;                  // The alarm's Set flag was cleared. The Unack state is unchanged.                              |
-    |                   |                             | eAlarmAck = 4;                  // The alarm changed state from "Unacknowledged" to "Acknowledged". The Set state is unchanged. |
-    |                   |                             | eReprise = 64;                  // A repetition/update of an event that has been reported before. Courtesy of late subscribers. |
-    |                   |                             | eSourceObjectUnavailable = 256; // The provider of the event has become unavailable. (disconnected or similar)                  |
-    |                   |                             | eNodeBoot = 1073741824;         // The provider reports that the CDPEventNode just have booted.                                 |
-    +-------------------+-----------------------------+---------------------------------------------------------------------------------------------------------------------------------+
-    | Event.status      | studio.protocol.EventStatus | Optional: Value primitive type the node holds if node may hold a value. Any of:                                                 |
-    |                   |                             | eStatusOK = 0x0,                 // No alarm set                                                                                |
-    |                   |                             | eNotifySet = 0x1,                // NOTIFY alarm set                                                                            |
-    |                   |                             | eWarningSet = 0x10,              // WARNING alarm set                                                                           |
-    |                   |                             | eLowLevelSet = 0x20,             // LOW LEVEL alarm set                                                                         |
-    |                   |                             | eHighLevelSet = 0x40,            // HIGH LEVEL alarm set                                                                        |
-    |                   |                             | eErrorSet = 0x100,               // ERROR alarm set                                                                             |
-    |                   |                             | eLowLowLevelSet = 0x200,         // LOW-LOW LEVEL alarm set                                                                     |
-    |                   |                             | eHighHighLevelSet = 0x400,       // HIGH-HIGH LEVEL alarm set                                                                   |
-    |                   |                             | eEmergencySet = 0x800,           // EMERGENCY LEVEL alarm present                                                               |
-    |                   |                             | eValueForced = 0x1000,           // Signal value was forced (overridden)                                                        |
-    |                   |                             | eRepeatBlocked = 0x2000,         // Alarm is blocked due to too many repeats                                                    |
-    |                   |                             | eProcessBlocked = 0x4000,        // Alarm is blocked by the software                                                            |
-    |                   |                             | eOperatorBlocked = 0x8000,       // Alarm is blocked by the user                                                                |
-    |                   |                             | eNotifyUnacked = 0x10000,        // NOTIFY alarm unacknowledged                                                                 |
-    |                   |                             | eWarningUnacked = 0x100000,      // WARNING alarm unacknowledged                                                                |
-    |                   |                             | eErrorUnacked = 0x1000000,       // ERROR alarm unacknowledged                                                                  |
-    |                   |                             | eEmergencyUnacked = 0x8000000,   // EMERGENCY alarm unacknowledged                                                              |
-    |                   |                             | eDisabled = 0x20000000,          // Alarm is disabled                                                                           |
-    |                   |                             | eSignalFault = 0x40000000,       // Signal has fault condition                                                                  |
-    |                   |                             | eComponentSuspended = 0x80000000 // Component is suspended                                                                      |
-    +-------------------+-----------------------------+---------------------------------------------------------------------------------------------------------------------------------+
-    | Event.timestamp   | string                      | Optional: time stamp, when this event was sent (in UTC nanotime)                                                                |
-    +-------------------+-----------------------------+---------------------------------------------------------------------------------------------------------------------------------+
-    | Event.data        | string                      | Optional: name + value pairs                                                                                                    |
-    +-------------------+-----------------------------+---------------------------------------------------------------------------------------------------------------------------------+
+    +-------------------+-----------------------------+------------------------------------+--------------------------------------------------------------------------------------+
+    | Property          | Type                        | Value                              | Description                                                                          |
+    +===================+=============================+====================================+======================================================================================+
+    | Event.id          | number                      | Optional: System unique eventId (CDP eventId + handle)                                                                    |
+    +-------------------+-----------------------------+---------------------------------------------------------------------------------------------------------------------------+
+    | Event.sender      | string                      | Optional: Event sender full name                                                                                          |
+    +-------------------+-----------------------------+---------------------------------------------------------------------------------------------------------------------------+
+    | Event.code        | studio.protocol.EventCode   | Optional: Event code flags. Any of:                                                                                       |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eAlarmSet                 | The alarm's Set flag/state was set. The alarm changed state to "Unack-Set"                  |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eAlarmClr                 | The alarm's Set flag was cleared. The Unack state is unchanged.                             |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eAlarmAck                 | The alarm changed state from "Unacknowledged" to "Acknowledged". The Set state is unchanged.|
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eReprise                  | A repetition/update of an event that has been reported before. Courtesy of late subscribers.|
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eSourceObjectUnavailable  | The provider of the event has become unavailable. (disconnected or similar)                 |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eNodeBoot                 | The provider reports that the CDPEventNode just have booted.                                |
+    +-------------------+-----------------------------+-----------------------------+---------------------------------------------------------------------------------------------+
+    | Event.status      | studio.protocol.EventStatus | Optional: Value primitive type the node holds if node may hold a value. Any of:                                           |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eStatusOK                 | No alarm set                                                                                |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eNotifySet                | NOTIFY alarm set                                                                            |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eWarningSet               | WARNING alarm set                                                                           |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eLowLevelSet              | LOW LEVEL alarm set                                                                         |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eHighLevelSet             | HIGH LEVEL alarm set                                                                        |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eErrorSet                 | ERROR alarm set                                                                             |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eLowLowLevelSet           | LOW-LOW LEVEL alarm set                                                                     |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eHighHighLevelSet         | HIGH-HIGH LEVEL alarm set                                                                   |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eEmergencySet             | EMERGENCY LEVEL alarm present                                                               |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eValueForced              | Signal value was forced (overridden)                                                        |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eRepeatBlocked            | Alarm is blocked due to too many repeats                                                    |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eProcessBlocked           | Alarm is blocked by the software                                                            |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eOperatorBlocked          | Alarm is blocked by the user                                                                |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eNotifyUnacked            | NOTIFY alarm unacknowledged                                                                 |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eWarningUnacked           | WARNING alarm unacknowledged                                                                |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eErrorUnacked             | ERROR alarm unacknowledged                                                                  |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eEmergencyUnacked         | EMERGENCY alarm unacknowledged                                                              |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eDisabled                 | Alarm is disabled                                                                           |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eSignalFault              | Signal has fault condition                                                                  |
+    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
+    |                   |                             | - eComponentSuspended       | Component is suspended                                                                      |
+    +-------------------+-----------------------------+------------------------------------+--------------------------------------------------------------------------------------+
+    | Event.timestamp   | string                      | Optional: time stamp, when this event was sent (in UTC nanotime)                                                          |
+    +-------------------+-----------------------------+---------------------------------------------------------------------------------------------------------------------------+
+    | Event.data        | string                      | Optional: name + value pairs                                                                                              |
+    +-------------------+-----------------------------+---------------------------------------------------------------------------------------------------------------------------+
 
 - Example
 
