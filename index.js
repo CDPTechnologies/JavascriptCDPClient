@@ -341,7 +341,7 @@ studio.internal = (function(proto) {
     var valueSubscriptions = [];
     var structureSubscriptions = [];
     var eventSubscriptions = [];
-    var lastValue;
+    var lastValue = null;
     var lastInfo = null; //when we get this, if there are any child requests we need to fetch child fetch too
     var valid = true;
 
@@ -387,7 +387,7 @@ studio.internal = (function(proto) {
     };
 
     this.lastValue = function() {
-      return lastValue;
+      return lastValue.value;
     };
 
     this.forEachChild = function(iteratorFunction) {
@@ -403,7 +403,9 @@ studio.internal = (function(proto) {
       parent = nodeParent;
       lastInfo = protoInfo;
       id = protoInfo.node_id;
-      this.async._makeGetterRequest();
+      if (valueSubscriptions.length) {
+        this.async._makeGetterRequest();
+      }
       for (var i = 0; i < eventSubscriptions.length; i++)
         app.makeEventRequest(id, eventSubscriptions[i][1], false);
     };
@@ -446,9 +448,9 @@ studio.internal = (function(proto) {
     };
 
     this.receiveValue = function (nodeValue, nodeTimestamp) {
-      lastValue = nodeValue;
+      lastValue = {value: nodeValue, time: nodeTimestamp};
       for (var i = 0; i < valuePromises.length; i++) {
-        valuePromises[i](lastValue);
+        valuePromises[i](nodeValue);
         valuePromises.splice(i, 1);
       }
       for (var i = 0; i < valueSubscriptions.length; i++) {
@@ -495,6 +497,9 @@ studio.internal = (function(proto) {
     };
 
     this.async.subscribeToValues = function(valueConsumer, fs, sampleRate) {
+      if (lastValue) {
+        valueConsumer(lastValue.value, lastValue.time);
+      }
       valueSubscriptions.push([valueConsumer, fs, sampleRate]);
       this._makeGetterRequest();
     };
@@ -1460,6 +1465,7 @@ studio.api = (function(internal) {
 })(studio.internal);
 
 export default studio
+
 
 
 
