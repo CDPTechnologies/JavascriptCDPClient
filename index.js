@@ -337,6 +337,7 @@ studio.internal = (function(proto) {
     var childMap = new Map();
     var givenPromises = new Map();
     var childIterators = [];
+    var valuePromises = [];
     var valueSubscriptions = [];
     var structureSubscriptions = [];
     var eventSubscriptions = [];
@@ -446,6 +447,10 @@ studio.internal = (function(proto) {
 
     this.receiveValue = function (nodeValue, nodeTimestamp) {
       lastValue = nodeValue;
+      for (var i = 0; i < valuePromises.length; i++) {
+        valuePromises[i](lastValue);
+        valuePromises.splice(i, 1);
+      }
       for (var i = 0; i < valueSubscriptions.length; i++) {
         valueSubscriptions[i][0](nodeValue, nodeTimestamp);
       }
@@ -532,6 +537,14 @@ studio.internal = (function(proto) {
       lastValue = value;
       app.makeSetterRequest(id, lastInfo.value_type, value, timestamp);
       //when offline must queue or update pending set request and call set callbacks ...???
+    };
+
+    this.async.requestValue = function() {
+      let promise = new Promise(function (resolve, reject) {
+        valuePromises.push(resolve);
+      });
+      app.makeGetterRequest(id, 0, 0, false);
+      return promise;
     };
 
     this.async._makeGetterRequest = function() {
@@ -656,6 +669,10 @@ studio.internal = (function(proto) {
         pendingFetches[index].onDone(resolve, reject, apiNode);
         pendingFetches.splice(index, 1);
       } 
+    };
+
+    this.async.requestValue = function() {
+
     };
 
     this.async.subscribeToValues = function(valueConsumer, fs=5, sampleRate=0) {
@@ -830,7 +847,9 @@ studio.internal = (function(proto) {
       var msg = new proto.Container();
       var request = new proto.ValueRequest();
       request.node_id = id;
-      request.fs = fs;
+      if (fs) {
+        request.fs = fs;
+      }
       if (sampleRate) {
         request.sample_rate = sampleRate;
       }
@@ -1107,6 +1126,7 @@ studio.api = (function(internal) {
     this.info = function() {
       return node.info();
     };
+
     /**
      * Access the last known value.
      *
@@ -1189,6 +1209,15 @@ studio.api = (function(internal) {
      * @param {number} value
      * @param {number} timestamp
      */
+
+    /**
+     * Fetch current value.
+     *
+     * @returns {Promise.<number>} A promise containing fetched value when fulfilled.
+     */
+    this.requestValue = function() {
+      return node.async.requestValue();
+    };
 
     /**
      * Subscribe to value changes on this node.
@@ -1431,5 +1460,6 @@ studio.api = (function(internal) {
 })(studio.internal);
 
 export default studio
+
 
 
