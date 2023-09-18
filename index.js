@@ -406,6 +406,9 @@ studio.internal = (function(proto) {
       if (valueSubscriptions.length) {
         this.async._makeGetterRequest();
       }
+      if (valuePromises.length) {
+        app.makeGetterRequest(id, 0, 0, false);
+      }
       for (var i = 0; i < eventSubscriptions.length; i++)
         app.makeEventRequest(id, eventSubscriptions[i][1], false);
     };
