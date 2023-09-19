@@ -112,7 +112,7 @@ studio.protocol = (function(ProtoBuf) {
     case obj.CDPValueType.eSTRING:
       return variantValue.str_value;
     default:
-      return 0;
+      return undefined;
   }
   };
 
@@ -337,10 +337,11 @@ studio.internal = (function(proto) {
     var childMap = new Map();
     var givenPromises = new Map();
     var childIterators = [];
+    var valuePromises = [];
     var valueSubscriptions = [];
     var structureSubscriptions = [];
     var eventSubscriptions = [];
-    var lastValue;
+    var lastValue = null;
     var lastInfo = null; //when we get this, if there are any child requests we need to fetch child fetch too
     var valid = true;
 
@@ -386,7 +387,7 @@ studio.internal = (function(proto) {
     };
 
     this.lastValue = function() {
-      return lastValue;
+      return lastValue.value;
     };
 
     this.forEachChild = function(iteratorFunction) {
@@ -402,7 +403,12 @@ studio.internal = (function(proto) {
       parent = nodeParent;
       lastInfo = protoInfo;
       id = protoInfo.node_id;
-      this.async._makeGetterRequest();
+      if (valueSubscriptions.length) {
+        this.async._makeGetterRequest();
+      }
+      if (valuePromises.length) {
+        app.makeGetterRequest(id, 0, 0, false);
+      }
       for (var i = 0; i < eventSubscriptions.length; i++)
         app.makeEventRequest(id, eventSubscriptions[i][1], false);
     };
@@ -445,7 +451,11 @@ studio.internal = (function(proto) {
     };
 
     this.receiveValue = function (nodeValue, nodeTimestamp) {
-      lastValue = nodeValue;
+      lastValue = {value: nodeValue, time: nodeTimestamp};
+      for (var i = 0; i < valuePromises.length; i++) {
+        valuePromises[i](nodeValue);
+        valuePromises.splice(i, 1);
+      }
       for (var i = 0; i < valueSubscriptions.length; i++) {
         valueSubscriptions[i][0](nodeValue, nodeTimestamp);
       }
@@ -490,6 +500,9 @@ studio.internal = (function(proto) {
     };
 
     this.async.subscribeToValues = function(valueConsumer, fs, sampleRate) {
+      if (lastValue) {
+        valueConsumer(lastValue.value, lastValue.time);
+      }
       valueSubscriptions.push([valueConsumer, fs, sampleRate]);
       this._makeGetterRequest();
     };
@@ -532,6 +545,14 @@ studio.internal = (function(proto) {
       lastValue = value;
       app.makeSetterRequest(id, lastInfo.value_type, value, timestamp);
       //when offline must queue or update pending set request and call set callbacks ...???
+    };
+
+    this.async.requestValue = function() {
+      let promise = new Promise(function (resolve, reject) {
+        valuePromises.push(resolve);
+      });
+      app.makeGetterRequest(id, 0, 0, false);
+      return promise;
     };
 
     this.async._makeGetterRequest = function() {
@@ -656,6 +677,10 @@ studio.internal = (function(proto) {
         pendingFetches[index].onDone(resolve, reject, apiNode);
         pendingFetches.splice(index, 1);
       } 
+    };
+
+    this.async.requestValue = function() {
+
     };
 
     this.async.subscribeToValues = function(valueConsumer, fs=5, sampleRate=0) {
@@ -830,7 +855,9 @@ studio.internal = (function(proto) {
       var msg = new proto.Container();
       var request = new proto.ValueRequest();
       request.node_id = id;
-      request.fs = fs;
+      if (fs) {
+        request.fs = fs;
+      }
       if (sampleRate) {
         request.sample_rate = sampleRate;
       }
@@ -1107,6 +1134,7 @@ studio.api = (function(internal) {
     this.info = function() {
       return node.info();
     };
+
     /**
      * Access the last known value.
      *
@@ -1189,6 +1217,15 @@ studio.api = (function(internal) {
      * @param {number} value
      * @param {number} timestamp
      */
+
+    /**
+     * Fetch current value.
+     *
+     * @returns {Promise.<number>} A promise containing fetched value when fulfilled.
+     */
+    this.requestValue = function() {
+      return node.async.requestValue();
+    };
 
     /**
      * Subscribe to value changes on this node.
@@ -1431,5 +1468,8 @@ studio.api = (function(internal) {
 })(studio.internal);
 
 export default studio
+
+
+
 
 

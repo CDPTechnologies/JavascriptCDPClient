@@ -253,10 +253,6 @@ client.find(path)
 
     Promise containing requested INode object when fulfilled.
     
-- Restriction
-
-    The requested node must reside in the application client was connected to.
-
 - Usage
 
     The provided path must contain dot separated path to target node. **Root node is not considered part of the path.**
@@ -357,6 +353,21 @@ node.info()
     |                  |                              | - eNodeIsImportant                                            |
     +------------------+------------------------------+---------------------------------------------------------------+
 
+node.requestValue()
+^^^^^^^^^^^^^^^^^^^
+
+- Returns
+
+    Promise containing fetched value when fulfilled.
+
+- Example
+
+    .. code:: javascript
+
+        client.requestValue().then(function (value) {
+
+        });
+        
 node.lastValue()
 ^^^^^^^^^^^^^^^^
 
