@@ -112,7 +112,7 @@ studio.protocol = (function(ProtoBuf) {
     case obj.CDPValueType.eSTRING:
       return variantValue.str_value;
     default:
-      return 0;
+      return undefined;
   }
   };
 
@@ -1468,6 +1468,7 @@ studio.api = (function(internal) {
 })(studio.internal);
 
 export default studio
+
 
 
 
