@@ -157,8 +157,8 @@ result.additionalCredentials()
             Parameter parameter = [];
         }
 
-studio.api.Client(uri, notificationListener)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+studio.api.Client(uri, notificationListener, autoConnect)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 - Arguments
 
@@ -167,6 +167,8 @@ studio.api.Client(uri, notificationListener)
     notificationListener - Object returning two functions: applicationAcceptanceRequested(studio.api.Request) and credentialsRequested(studio.api.Request). 
       Function applicationAcceptanceRequested must return a Promise of void. Can be used to popup system use notification message and ask for confirmation to continue.
       Function credentialsRequested must return a Promise of dictionary containing 'Username' and 'Password' as keys for authentication.
+    
+    autoConnect - Tries to reconnect once disconnected. By default is enabled. 
 
 - Returns
 

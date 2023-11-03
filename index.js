@@ -230,7 +230,6 @@ studio.protocol = (function(ProtoBuf) {
 
     this.handle = function(message){
       return new Promise(function(resolve, reject) {
-
         try {
           var hello = obj.Hello.decode(message);
         } catch (err) {
@@ -555,16 +554,16 @@ studio.internal = (function(proto) {
     var connecting = false;
     var this_ = this;
 
-    this.onAppConnect = function(url, notificationListener) {
+    this.onAppConnect = function(url, notificationListener, autoConnect) {
       return new Promise(function (resolve, reject) {
-        var appConnection = new obj.AppConnection(url, notificationListener);
+        var appConnection = new obj.AppConnection(url, notificationListener, autoConnect);
         appConnections.push(appConnection);
         var sys = appConnection.root();
         sys.async.onDone(resolve, reject, sys);
       });
     };
 
-    this.onConnect = function(resolve, reject) {
+    this.onConnect = function(resolve, reject, autoConnect) {
       if (connected) {
         resolve(this_);
         return;
@@ -578,13 +577,13 @@ studio.internal = (function(proto) {
       connecting = true;
       pendingConnects.push({resolve: resolve, reject: reject});
 
-      this.onAppConnect(studioURL, notificationListener).then(function(system){
+      this.onAppConnect(studioURL, notificationListener, autoConnect).then(function(system){
         var promises = [];
         system.forEachChild(function (app) {
           if (!app.info().is_local)
           {
             var appUrl = app.info().server_addr + ":" + app.info().server_port;
-            promises.push(this_.onAppConnect(appUrl, notificationListener));
+            promises.push(this_.onAppConnect(appUrl, notificationListener, autoConnect));
           }
         });
         Promise.all(promises).then(function() {
@@ -711,7 +710,7 @@ studio.internal = (function(proto) {
     };
   };
 
-  obj.AppConnection = function(url, notificationListener) {
+  obj.AppConnection = function(url, notificationListener, autoConnect) {
     var appConnection = this;
     var appName = "";
     var appId = undefined;
@@ -783,17 +782,20 @@ studio.internal = (function(proto) {
 
       console.log("Socket close: " + reason);
 
-      setTimeout(function () {
-        console.log("Trying to reconnect", appUrl);
-        socket = new WebSocket(appUrl);
-        handler = new proto.Handler(socket, notificationListener);
-        handler.onContainer = handleIncomingContainer;
-        socket.binaryType = proto.BINARY_TYPE;
-        socket.onopen = onOpen;
-        socket.onclose = onClosed;
-        socket.onmessage = onMessage;
-        socket.onerror = onError;
-      }, 3000);
+      if (autoConnect)
+      {
+        setTimeout(function () {
+          console.log("Trying to reconnect", appUrl);
+          socket = new WebSocket(appUrl);
+          handler = new proto.Handler(socket, notificationListener);
+          handler.onContainer = handleIncomingContainer;
+          socket.binaryType = proto.BINARY_TYPE;
+          socket.onopen = onOpen;
+          socket.onclose = onClosed;
+          socket.onmessage = onMessage;
+          socket.onerror = onError;
+        }, 3000);
+      }
     };
 
     socket.onopen = onOpen;
@@ -1364,7 +1366,7 @@ studio.api = (function(internal) {
    * @this Client
    * @constructor
    */
-  obj.Client = function(studioURL, notificationListener) {
+  obj.Client = function(studioURL, notificationListener, autoConnect = true) {
     var system = new internal.SystemNode(studioURL, notificationListener);
 
     /**
@@ -1376,7 +1378,7 @@ studio.api = (function(internal) {
       return new Promise(function(resolve, reject) {
         system.onConnect(function(system){
           resolve(new INode(system));
-        }, reject);
+        }, reject, autoConnect);
       });
     };
 
