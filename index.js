@@ -714,7 +714,7 @@ studio.internal = (function(proto) {
     var appConnection = this;
     var appName = "";
     var appId = undefined;
-    var appUrl = (location.protocol=="https:" ? proto.WSS_PREFIX : proto.WS_PREFIX) + url;
+    var appUrl = composeUrl(url);
     var socket = new WebSocket(appUrl);
     var handler = new proto.Handler(socket, notificationListener);
     var requests = [];
@@ -802,6 +802,22 @@ studio.internal = (function(proto) {
     socket.onclose = onClosed;
     socket.onmessage = onMessage;
     socket.onerror = onError;
+
+    function composeUrl(url) {
+      var result = (location.protocol=="https:" ? proto.WSS_PREFIX : proto.WS_PREFIX) + url; //default
+      if (URL.canParse(url)) {
+        var u = new URL(url);
+        if (u.protocol && u.host) {
+          if (u.protocol=="https:")
+            result = proto.WSS_PREFIX + u.host;
+          else if (u.protocol=="http:")
+            result = proto.WS_PREFIX + u.host;
+          else
+           result = u.origin;
+        }
+      }
+      return result;
+    }
 
     function send(message) {
       if (socket.readyState == WebSocket.OPEN) {
