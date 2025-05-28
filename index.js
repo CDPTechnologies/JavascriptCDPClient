@@ -322,6 +322,7 @@ studio.protocol.BINARY_TYPE = "arraybuffer";
  */
 studio.internal = (function(proto) {
   var obj = {};
+  var hostTimeOffsets = new Map();
 
   obj.structure  = {
     REMOVE: 0,
@@ -715,6 +716,7 @@ studio.internal = (function(proto) {
     var appName = "";
     var appId = undefined;
     var appUrl = composeUrl(url);
+    var host = new URL(appUrl).hostname;
     var socket = new WebSocket(appUrl);
     var handler = new proto.Handler(socket, notificationListener);
     var requests = [];
@@ -725,7 +727,7 @@ studio.internal = (function(proto) {
     var onError;
     var onOpen;
     var reauthRequestPending = false;
-    var timeOffsetNs = 0;
+    var timeOffsetNs = hostTimeOffsets.get(host) || 0;
     var timeSyncTimer = null;
     var timeSyncSamples = [];
     socket.binaryType = proto.BINARY_TYPE;
@@ -791,7 +793,6 @@ studio.internal = (function(proto) {
 
       console.log("Socket close: " + reason);
       stopTimeSync();
-      timeOffsetNs = 0;
 
       if (autoConnect)
       {
@@ -851,6 +852,11 @@ studio.internal = (function(proto) {
       send(msg);
     }
 
+    function setTimeOffset(offset) {
+      timeOffsetNs = offset;
+      hostTimeOffsets.set(host, offset);
+    }
+
     function beginTimeSync() {
       if (timeSyncSamples.length === 0) {
         makeCurrentTimeRequest();
@@ -868,7 +874,7 @@ studio.internal = (function(proto) {
       var minOffset = Math.min.apply(null, timeSyncSamples);
       timeSyncSamples = [];
       if (Math.abs(minOffset) > 3000000000) {
-        timeOffsetNs = minOffset;
+        setTimeOffset(minOffset);
       }
     }
 
@@ -886,7 +892,7 @@ studio.internal = (function(proto) {
     function applyTimeOffset(ts) {
       if (ts === undefined || ts === null)
         return ts;
-      return ts + timeOffsetNs;
+      return ts + (hostTimeOffsets.get(host) || 0);
     }
 
     this.makeStructureRequest = function(id) {
