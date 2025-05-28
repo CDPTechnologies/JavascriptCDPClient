@@ -447,6 +447,10 @@ node.subscribeToValues(valueConsumer, fs, sampleRate)
     Subscribe to value changes on this node. On each value change valueConsumer function is called
     with value of the nodes value_type and UTC Unix timestamp in nanoseconds (nanoseconds from 01.01.1970).
     Timestamp refers to the time of value change in connected application on target controller.
+    If the client detects a time synchronization offset larger than 3 seconds,
+    incoming timestamps are automatically adjusted by that offset. The offset is
+    determined by sending three consecutive time-sync requests and using the
+    smallest offset reported.
     
 - Example
 
