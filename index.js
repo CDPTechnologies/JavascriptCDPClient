@@ -753,6 +753,9 @@ studio.internal = (function(proto) {
     onOpen = function() {
       appConnection.resubscribe(systemNode);
       startTimeSync();
+      if (!timeSyncTimer) {
+        timeSyncTimer = setInterval(startTimeSync, 30000);
+      }
     };
     onClosed = function (event) {
       var reason;
@@ -870,10 +873,7 @@ studio.internal = (function(proto) {
     }
 
     function startTimeSync() {
-      if (!timeSyncTimer) {
-        beginTimeSync();
-        timeSyncTimer = setInterval(beginTimeSync, 30000);
-      }
+      beginTimeSync();
     }
 
     function stopTimeSync() {
@@ -1109,7 +1109,6 @@ studio.internal = (function(proto) {
     }
 
     function handleIncomingContainer(protoContainer, metadata) {
-      startTimeSync();
       switch(protoContainer.message_type){
         case proto.ContainerType.eStructureResponse:
           parseStructureResponse(protoContainer.structure_response);
