@@ -1,5 +1,59 @@
-import protobuf, { convertFieldsToCamelCase } from 'protobufjs'
-import p from './studioapi.proto.js';
+var protobuf; // resolved at runtime – see initEnvironment()
+
+(function initEnvironment() {
+  const isNode = (typeof process !== 'undefined') && process.versions && process.versions.node && (typeof window === 'undefined');
+
+  if (isNode) {
+    // ──────────────────────────────── Node.js ──────────────────────────────
+    try {
+      protobuf = require('protobufjs');
+    } catch (e) {
+      console.error('[studioapi] Error loading protobufjs:', e.message);
+      throw new Error('[studioapi] Missing dependency "protobufjs" in Node.js: ' + e.message);
+    }
+
+    try {
+      if (typeof globalThis.p === 'undefined') {
+        globalThis.p = require('./studioapi.proto.js');
+      }
+    } catch (e) {
+      throw new Error('[studioapi] Unable to load "./studioapi.proto.js"');
+    }
+
+    const g = globalThis;
+
+    if (typeof g.WebSocket === 'undefined') {
+      try { g.WebSocket = require('ws'); } catch (_) { /* optional */ }
+    }
+
+    if (!g.crypto || !g.crypto.subtle) {
+      try { g.crypto = require('crypto').webcrypto; } catch (_) { /* optional */ }
+    }
+
+    if (typeof g.TextEncoder === 'undefined' || typeof g.TextDecoder === 'undefined') {
+      try {
+        const util = require('util');
+        g.TextEncoder = util.TextEncoder;
+        g.TextDecoder = util.TextDecoder;
+      } catch (_) { /* optional */ }
+    }
+
+    if (typeof g.URL === 'undefined') {
+      try { g.URL = require('url').URL; } catch (_) { /* optional */ }
+    }
+
+    if (typeof g.location === 'undefined') {
+      g.location = { protocol: 'ws:' };
+    }
+  } else {
+    // ─────────────────────────────── Browser ───────────────────────────────
+    if (typeof window !== 'undefined') {
+      protobuf = (window.dcodeIO && window.dcodeIO.ProtoBuf) ? window.dcodeIO.ProtoBuf : window.protobuf;
+    } else {
+      throw new Error('[studioapi] Neither Node.js nor Browser environment detected properly');
+    }
+  }
+})();
 
 /**
  * The studio namespace.
@@ -19,7 +73,7 @@ var studio = (function() {
  */
 studio.protocol = (function(ProtoBuf) {
   var obj = {},
-        studioBuilder = ProtoBuf.loadProto(p);
+        studioBuilder = ProtoBuf.loadProto(globalThis.p || p);
   obj.Hello = studioBuilder.build("Hello");
   obj.AuthRequest = studioBuilder.build("AuthRequest");
   obj.AuthRequestChallengeResponse = studioBuilder.build("AuthRequest.ChallengeResponse");
@@ -144,7 +198,7 @@ studio.protocol = (function(ProtoBuf) {
           authReq.challenge_response.push(response);
           resolve(authReq);
         })
-        .catch(function(err){ 
+        .catch(function(err){
           reject(err)
         });
     });
@@ -194,7 +248,7 @@ studio.protocol = (function(ProtoBuf) {
           socket.send(request.toArrayBuffer());
         })
         .catch(function(err){
-          console.log("Authentication cancelled.", err) 
+          console.log("Authentication cancelled.", err)
         });
     }.bind(this);
 
@@ -261,7 +315,7 @@ studio.protocol = (function(ProtoBuf) {
           applicationAccepted = notificationListener.applicationAcceptanceRequested;
         else
           applicationAccepted = applicationAcceptanceRequested;
-        
+
         applicationAccepted(request)
           .then(function(){
             if (hello.challenge) {
@@ -274,7 +328,7 @@ studio.protocol = (function(ProtoBuf) {
 
               var authHandler = new AuthHandler(socket, metadata, notificationListener.credentialsRequested, onContainer, onError);
               var userAuthResult = new studio.api.UserAuthResult(obj.AuthResultCode.eCredentialsRequired, 'Credentials required');
-              authHandler.sendAuthRequest(userAuthResult); 
+              authHandler.sendAuthRequest(userAuthResult);
               resolve(authHandler);
             }
             else {
@@ -573,7 +627,7 @@ studio.internal = (function(proto) {
         pendingConnects.push({resolve: resolve, reject: reject});
         return;
       }
-    
+
       connecting = true;
       pendingConnects.push({resolve: resolve, reject: reject});
 
@@ -654,7 +708,7 @@ studio.internal = (function(proto) {
       if (index > -1) {
         pendingFetches[index].onDone(resolve, reject, apiNode);
         pendingFetches.splice(index, 1);
-      } 
+      }
     };
 
     this.async.subscribeToValues = function(valueConsumer, fs=5, sampleRate=0) {
@@ -1291,7 +1345,7 @@ studio.api = (function(internal) {
     this.subscribeToValues = function(valueConsumer, fs=5, sampleRate=0) {
       node.async.subscribeToValues(valueConsumer, fs, sampleRate);
     };
-    
+
     /**
      * Subscribe to events on this node.
      *
@@ -1310,7 +1364,7 @@ studio.api = (function(internal) {
     this.unsubscribeFromEvents = function(eventConsumer) {
       node.async.unsubscribeFromEvents(eventConsumer);
     };
-        
+
     /**
      * Add child Node to this Node.
      *
@@ -1448,6 +1502,13 @@ studio.api = (function(internal) {
   return obj;
 })(studio.internal);
 
-export default studio
+/* --------------------------------------------------------------------------
+ * Module export (CommonJS/ES Module hybrid)
+ * ------------------------------------------------------------------------ */
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = studio;
+} else if (typeof globalThis !== 'undefined') {
+  globalThis.studio = studio;
+}
 
 
