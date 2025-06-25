@@ -21,10 +21,24 @@ may also have other INode objects as children.
 
 Before all examples, you need:
 
+**Browser (Script Tag):**
+
+    .. code:: html
+
+        <script src="./protobuf.min.js"></script>
+        <script src="./studioapi.proto.js"></script>
+        <script src="./index.js"></script>
+        <script>
+          // studio is now available as a global
+          var client = new studio.api.Client(...);
+        </script>
+
+**Node.js (CommonJS):**
+
     .. code:: javascript
 
-        import studio from "cdp-client"
-    
+        const studio = require("cdp-client")
+
 Global API
 ~~~~~~~~~~
 
@@ -36,15 +50,15 @@ studio.api.Request(systemName, applicationName, cdpVersion, systemUseNotificatio
     systemName - System name the application belongs to.
 
     applicationName - Application name.
-      
+
     cdpVersion - CDP version the application is built with.
-      
+
     systemUseNotification - System use notification message to ask for confirmation to continue.
-      
+
 - Returns
 
     The created Request object.
-    
+
 Instance Methods / Request
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -92,9 +106,9 @@ studio.api.UserAuthResult(code, text, additionalCredentials)
     code - response code.
 
     text - response info/error.
-      
+
     additionalCredentials - Returns additional credentials if required by received response code.
-      
+
 - Returns
 
     The created UserAuthResult object.
@@ -108,7 +122,7 @@ result.code()
 - Returns
 
     Authentication response code.
-    
+
     +---------------------------------+----------------------------------------------+---------------------------------------------------------------------------------------+
     | Type                            | Value                                        | Description                                                                           |
     +=================================+==============================================+=======================================================================================+
@@ -121,7 +135,7 @@ result.code()
     |                                 | - eGrantedPasswordWillExpireSoon             | expiry timestamp is provided by text()                                                |
     +                                 +----------------------------------------------+---------------------------------------------------------------------------------------+
     |                                 | - eNewPasswordRequired                       | AuthRequest with additional response with new username + password hash is required    |
-    +                                 +----------------------------------------------+---------------------------------------------------------------------------------------+ 
+    +                                 +----------------------------------------------+---------------------------------------------------------------------------------------+
     |                                 | - eInvalidChallengeResponse                  | challenge response sent was invalid                                                   |
     +                                 +----------------------------------------------+---------------------------------------------------------------------------------------+
     |                                 | - eAdditionalResponseRequired                | additional challenge responses based on additional credential types are required.     |
@@ -146,7 +160,7 @@ result.additionalCredentials()
     Additional credentials in following structure:
 
     .. code:: none
-         
+
         returns {
             string type;
             string prompt;
@@ -164,11 +178,11 @@ studio.api.Client(uri, notificationListener, autoConnect)
 
     uri - String containing the address and port of StudioAPI server separated by colon character
 
-    notificationListener - Object returning two functions: applicationAcceptanceRequested(studio.api.Request) and credentialsRequested(studio.api.Request). 
+    notificationListener - Object returning two functions: applicationAcceptanceRequested(studio.api.Request) and credentialsRequested(studio.api.Request).
       Function applicationAcceptanceRequested must return a Promise of void. Can be used to popup system use notification message and ask for confirmation to continue.
       Function credentialsRequested must return a Promise of dictionary containing 'Username' and 'Password' as keys for authentication.
-    
-    autoConnect - Tries to reconnect once disconnected. By default is enabled. 
+
+    autoConnect - Tries to reconnect once disconnected. By default is enabled.
 
 - Returns
 
@@ -179,26 +193,26 @@ studio.api.Client(uri, notificationListener, autoConnect)
     Create client object to interrogate a CDP Application. The client constructor expects a full
     uri with port number separated by colon pointing to StudioAPI service. For exact IP and Port see
     CDP Application startup output.
-    
+
 - Example
 
     .. code:: javascript
 
         // Create client connected to uri provided in browser address bar.
         var client = new studio.api.Client(window.location.host);
-    
+
     .. code:: javascript
 
         // Create client with NotificationListener connected to uri provided in browser address bar.
         // The NotificationListener is only called when page requires a login.
-        
+
         class NotificationListener {
           applicationAcceptanceRequested(request) {
             return new Promise(function(resolve, reject) {
               if (request.systemUseNotification()) {
                 // Pop up a System Use Notification message and ask for confirmation to continue,
                 // then based on the user answer call either resolve() or reject()
-              } 
+              }
               else
                 resolve();
             });
@@ -220,6 +234,24 @@ studio.api.Client(uri, notificationListener, autoConnect)
 
         var client = new studio.api.Client(window.location.host, new NotificationListener());
 
+    .. code:: javascript
+
+        // Node.js example
+        const studio = require("cdp-client");
+
+        const client = new studio.api.Client("127.0.0.1:7689", {
+          applicationAcceptanceRequested: async (request) => {
+            console.log('Application access requested');
+          },
+          credentialsRequested: async (request) => {
+            return { Username: "cdpuser", Password: "cdpuser" };
+          }
+        });
+
+        client.root().then(root => {
+          console.log("Connected to:", root.name());
+        });
+
 
 Instance Methods / Client
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -235,7 +267,7 @@ client.root()
 
     Wait for root INode object to be available from connected application. The root node is
     the top-level "system" node that contains the connected applications.
-    
+
 - Example
 
     .. code:: javascript
@@ -254,7 +286,7 @@ client.find(path)
 - Returns
 
     Promise containing requested INode object when fulfilled.
-    
+
 - Restriction
 
     The requested node must reside in the application client was connected to.
@@ -270,21 +302,21 @@ client.find(path)
         client.find("MyApp.CPULoad").then(function (load) {
           // use the load object referring to CPULoad in MyApp
         });
-        
+
 Instance Methods / INode
 ~~~~~~~~~~~~~~~~~~~~~~~~
-     
+
 node.name()
 ^^^^^^^^^^^
 
 - Returns
 
     Node name.
-    
+
 - Usage
 
     Get the short node name of INode object. Names in a parent node are all unique.
-    
+
 node.info()
 ^^^^^^^^^^^
 
@@ -296,7 +328,7 @@ node.info()
 
     Internal Info object should be used sparingly in client code as it is a protocol object any may change more often.
     Optional object members may not be present on all instances.
-    
+
 - Details
 
     +------------------+------------------------------+---------------------------------------------------------------+
@@ -369,14 +401,14 @@ node.lastValue()
 - Usage
 
     Access the last known value of existing INode object.
-  
+
 node.setValue(value, timestamp)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 - Arguments
 
     value
-    
+
     timestamp - timestamp in nanoseconds since EPOCH presented as long int
 
 - Returns
@@ -386,7 +418,7 @@ node.setValue(value, timestamp)
 - Usage
 
     **Setting value and timestamp (timestamp will be ignored in current implementation).**
-  
+
 node.forEachChild(iteratorCallback)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -397,7 +429,7 @@ node.forEachChild(iteratorCallback)
 - Usage
 
     Iterate over children of current node. Iteration starts latest when children for the node are resolved.
-    
+
 - Example
 
     .. code:: javascript
@@ -430,16 +462,16 @@ node.child(name)
         node.child("CPULoad").then(function (load) {
           // use the load object referring to CPULoad child in current node
         });
-        
+
 node.subscribeToValues(valueConsumer, fs, sampleRate)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 - Arguments
 
     Function(value, timestamp) valueConsumer - timestamp in nanoseconds since EPOCH presented as long int
-    
+
     fs - maximum frequency that value updates are expected (controls how many changes are sent in a single packet). Defaults to 5 hz.
-    
+
     sampleRate - maximum amount of value updates sent per second (controls the amount of data transferred). Zero means all samples must be provided. Defaults to 0.
 
 - Usage
@@ -447,7 +479,7 @@ node.subscribeToValues(valueConsumer, fs, sampleRate)
     Subscribe to value changes on this node. On each value change valueConsumer function is called
     with value of the nodes value_type and UTC Unix timestamp in nanoseconds (nanoseconds from 01.01.1970).
     Timestamp refers to the time of value change in connected application on target controller.
-    
+
 - Example
 
     .. code:: javascript
@@ -455,7 +487,7 @@ node.subscribeToValues(valueConsumer, fs, sampleRate)
         cpuLoad.subscribeToValues(function (value, timestamp) {
           console.log("CPULoad:" + value + " at " + timestamp);
         });
-        
+
 node.unsubscribeFromValues(valueConsumer)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -474,11 +506,11 @@ node.subscribeToChildValues(name, valueConsumer, fs, sampleRate)
 - Arguments
 
     name
-    
+
     Function(value, timestamp) valueConsumer - timestamp in nanoseconds since EPOCH presented as long int
-    
+
     fs - maximum frequency that value updates are expected (controls how many changes are sent in a single packet). Defaults to 5 hz.
-    
+
     sampleRate - maximum amount of value updates sent per second (controls the amount of data transferred). Zero means all samples must be provided. Defaults to 0.
 
 - Usage
@@ -492,7 +524,7 @@ node.unsubscribeFromChildValues(name, valueConsumer)
 - Arguments
 
     name
-    
+
     Function(value, timestamp) valueConsumer - timestamp in nanoseconds since EPOCH presented as long int
 
 - Usage
@@ -529,7 +561,7 @@ node.subscribeToEvents(eventConsumer, timestampFrom)
 - Arguments
 
     Function(event) eventConsumer
-    
+
     timestampFrom - If 0, then all events are passed from the start of the CDP application.
                     If > 0, events starting from this timestamp (in UTC nanotime) are passed.
                     If not defined, then events from the moment of subscription is passed.
@@ -613,7 +645,7 @@ node.subscribeToEvents(eventConsumer, timestampFrom)
         node.subscribeToEvents(function (event) {
           console.log("Event triggered by:" + event.sender);
         });
-        
+
 node.unsubscribeFromEvent(eventConsumer)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -631,7 +663,7 @@ node.addChild(name, typeName)
 - Arguments
 
     name - Name for the new node
-    
+
     typeName - Model name to be used for adding the new node
 
 - Usage
@@ -644,7 +676,7 @@ node.removeChild(name)
 - Arguments
 
     name - Name of the node to be removed
-    
+
 - Usage
 
     Remove child Node from this Node.

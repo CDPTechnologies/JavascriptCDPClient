@@ -292,4 +292,9 @@ message EventInfo {
   extensions 100 to max;
 }
 `;
-export default p;
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = p;
+} else {
+  window.studioapiProto = p;
+}
