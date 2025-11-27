@@ -591,48 +591,6 @@ node.subscribeToEvents(eventConsumer, timestampFrom)
     |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
     |                   |                             | - eNodeBoot                 | The provider reports that the CDPEventNode just have booted.                                |
     +-------------------+-----------------------------+-----------------------------+---------------------------------------------------------------------------------------------+
-    | Event.status      | studio.protocol.EventStatus | Optional: Value primitive type the node holds if node may hold a value. Any of:                                           |
-    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eStatusOK                 | No alarm set                                                                                |
-    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eNotifySet                | NOTIFY alarm set                                                                            |
-    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eWarningSet               | WARNING alarm set                                                                           |
-    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eLowLevelSet              | LOW LEVEL alarm set                                                                         |
-    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eHighLevelSet             | HIGH LEVEL alarm set                                                                        |
-    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eErrorSet                 | ERROR alarm set                                                                             |
-    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eLowLowLevelSet           | LOW-LOW LEVEL alarm set                                                                     |
-    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eHighHighLevelSet         | HIGH-HIGH LEVEL alarm set                                                                   |
-    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eEmergencySet             | EMERGENCY LEVEL alarm present                                                               |
-    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eValueForced              | Signal value was forced (overridden)                                                        |
-    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eRepeatBlocked            | Alarm is blocked due to too many repeats                                                    |
-    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eProcessBlocked           | Alarm is blocked by the software                                                            |
-    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eOperatorBlocked          | Alarm is blocked by the user                                                                |
-    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eNotifyUnacked            | NOTIFY alarm unacknowledged                                                                 |
-    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eWarningUnacked           | WARNING alarm unacknowledged                                                                |
-    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eErrorUnacked             | ERROR alarm unacknowledged                                                                  |
-    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eEmergencyUnacked         | EMERGENCY alarm unacknowledged                                                              |
-    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eDisabled                 | Alarm is disabled                                                                           |
-    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eSignalFault              | Signal has fault condition                                                                  |
-    |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eComponentSuspended       | Component is suspended                                                                      |
-    +-------------------+-----------------------------+------------------------------------+--------------------------------------------------------------------------------------+
     | Event.timestamp   | string                      | Optional: time stamp, when this event was sent (in UTC nanotime)                                                          |
     +-------------------+-----------------------------+---------------------------------------------------------------------------------------------------------------------------+
     | Event.data        | string                      | Optional: name + value pairs                                                                                              |
@@ -680,4 +638,39 @@ node.removeChild(name)
 - Usage
 
     Remove child Node from this Node.
+
+Generic Proxy Support
+~~~~~~~~~~~~~~~~~~~~~
+
+When connecting to a CDP system running version 5.1 or later (compat_version >= 4), the client automatically
+uses the Generic Proxy protocol to access all applications through a single connection. This simplifies
+network configuration as only one port needs to be opened for remote access.
+
+The proxy is transparent to client code - connect to any application in the system and all sibling
+applications become accessible through the same connection. No additional configuration is required
+as the client detects proxy support automatically and falls back to direct connections for older
+CDP versions.
+
+- Simplified firewall configuration - only one port needs to be opened
+- SSH port forwarding - forward a single port to access entire CDP system
+- Web browser support - WASM/Web GUIs work without cross-origin restrictions
+- Reduced connections - single WebSocket handles all application traffic
+
+.. code:: javascript
+
+    // Connect to CDP system - proxy is automatic for CDP 5.1+
+    const client = new studio.api.Client('192.168.1.100:7689', {
+      credentialsRequested: async (request) => {
+        return { Username: "admin", Password: "admin" };
+      }
+    });
+
+    client.root().then(systemNode => {
+      console.log('Connected to:', systemNode.name());
+
+      // Access any application in the system
+      systemNode.forEachChild(app => {
+        console.log('Application:', app.name());
+      });
+    });
 

@@ -2,17 +2,18 @@ const p = `
 // This file describes the StudioAPI wire protocol. It can be compiled with
 // the Google Protobuf protoc compiler into native C++, Java, Python etc.
 
-//syntax = "proto2";
+syntax = "proto2";
 
-//package StudioAPI.Proto;
+package StudioAPI.Proto;
 
-//option optimize_for = LITE_RUNTIME;
-//option java_package = "com.cdptech.cdpclient.proto";
+option optimize_for = LITE_RUNTIME;
+option java_package = "com.cdptech.cdpclient.proto";
+option java_outer_classname = "StudioAPI";
 
 /** Initial server connection response. */
 message Hello {
   required string system_name = 1;
-  required uint32 compat_version = 2 [default = 2];
+  required uint32 compat_version = 2 [default = 4];
   required uint32 incremental_version = 3 [default = 0];
   repeated bytes public_key = 4;
   optional bytes challenge = 5; // if challenge exists then server expects authentication (AuthRequest message)
@@ -22,6 +23,12 @@ message Hello {
   optional uint32 cdp_version_patch = 9;
   optional uint32 idle_lockout_period = 10;
   optional string system_use_notification = 11;
+  message SuggestedUser {
+    optional string user_id = 1;
+    optional string first_name = 2;
+    optional string last_name = 3;
+  }
+  repeated SuggestedUser suggested_users = 12;
 }
 
 /** Server expects this response if it sent a auth_required true. */
@@ -60,6 +67,7 @@ message AuthResponse {
   optional AuthResultCode result_code = 1;
   optional string result_text = 2;
   repeated AdditionalChallengeResponseRequired additional_challenge_response_required = 3;
+  repeated string role_assigned = 4; // role name assigned (only when AuthResultCode = eGranted or eGrantedPasswordWillExpireSoon)
 }
 
 /** Common union-style base type for all Protobuf messages in StudioAPI. */
@@ -70,7 +78,7 @@ message Container {
     eStructureResponse = 2;
     eGetterRequest = 3;
     eGetterResponse = 4;
-    eSetterRequest = 5;
+    eSetterRequest = 5; // since compat_version=3, it will be responded with eGetterResponse with actually set value
     eStructureChangeResponse = 6;
     eCurrentTimeRequest = 7;
     eCurrentTimeResponse = 8;
@@ -81,6 +89,9 @@ message Container {
     eActivityNotification = 13;
     eEventRequest = 14; // supported since compat_version=2
     eEventResponse = 15; // supported since compat_version=2
+    eServicesRequest = 16; // supported since compat_version=4
+    eServicesNotification = 17; // supported since compat_version=4
+    eServiceMessage = 18; // supported since version compat_version=4
   }
   optional Type message_type = 1;
   optional Error error = 2;
@@ -97,6 +108,20 @@ message Container {
   optional AuthResponse re_auth_response = 13;
   repeated EventRequest event_request = 14; // supported since compat_version=2
   repeated EventInfo event_response = 15; // supported since compat_version=2
+  repeated uint32 request_ids = 16 [packed=true] ; // Supported since compat_version=3. If present, it is a list of client-generated
+                                    // request id-s in same order as individual requests in the Container
+                                    // When present, server responses the same request id values back the same way
+                                    // corresponding by order to every response element in the Container. On error the
+                                    // id will be echoed back within the Error message.
+                                    // Note, that subsequent subscription value change or event Containers (except the first,
+                                    // subscription confirmation response message Container), that are not a direct
+                                    // response to any request, do not have this field set.
+                                    // Note, that zero value means that the request corresponding to that position in Container
+                                    // has no actual requestId assigned, and is packed to the list only to match the vector
+                                    // size in case when some other requests in the Container has requestId.
+  optional ServicesRequest services_request = 17; // supported since compat_version=4
+  optional ServicesNotification services_notification = 18; // supported since compat_version=4
+  repeated ServiceMessage service_message = 19; // supported since compat_version=4
   extensions 100 to max;
 }
 
@@ -120,6 +145,8 @@ enum RemoteErrorCode {
   eVALUE_THROTTLING_STOPPED = 31;
   eCHILD_ADD_FAILED = 40;
   eCHILD_REMOVE_FAILED = 50;
+  eNODE_NOT_FOUND = 60;
+  eINTERNAL_ERROR = 70;
 }
 
 /** CDP Node base type identifier. */
@@ -229,12 +256,18 @@ message VariantValue {
 /** Single and periodic value request message. */
 message ValueRequest {
   required uint32 node_id = 1; // Node ID whose value is requested
-  optional double fs = 2; // If present indicates that values expected no more often than provided FS rate
-                          // (server will accumulate and time-stamp values if they occur more often)
+  optional double fs = 2; // If present (and stop is not present), indicates that the request is value-change subscription
+                          // and values are expected no often than provided FS rate (server should accumulate and time-stamp values when occurred more often)
+                          // Note, that this also causes server to send a node last known value immediately,
+                          // on subscription start, to confirm the subscription was started.
   optional bool stop = 3; // If true target must stop updates on the provided values else this is start
   optional double sample_rate = 4; // If non zero indicates that values should be
                                    // sampled with given sampling rate frequency (samples/second)
                                    // missing or zero means all samples must be provided
+  optional uint32 inactivity_resend_interval = 5; // Supported since compat_version=3. If provided, then server will start to
+                                                  // resend the current value, whenever the node_id had no value-changes
+                                                  // during given interval (in seconds), useful for confirmation that the
+                                                  // subscription is still alive and server is still able to send this node values.
   extensions 100 to max;
 }
 
@@ -243,44 +276,29 @@ message EventRequest {
   optional uint32 node_id = 1; // Target should forward events sent by this node ID (and its children)
   optional uint64 starting_from = 2; // If present, target should re-forward history of past events starting from this timestamp
   optional bool stop = 3; // If true, target must stop sending any new events, else this is subscribe request for future events
+  optional uint32 inactivity_resend_interval = 4; // Supported since compat_version=3. If provided, then server will start
+                                                  // to resend the last event (or "empty" event with code=0, and timestamp=0,
+                                                  // when no event matches the request parameters), whenever the node_id (or its children)
+                                                  // had no new events during given interval (in seconds), useful for confirmation
+                                                  // that the subscription is still alive and server is still able to send this node events.
+                                                  // Note, that this also causes server to send a last happened event immediately,
+                                                  // on subscription start, to confirm the subscription was started.
   extensions 100 to max;
 }
 
 /** CDP Event info */
 message EventInfo {
+  repeated uint32 node_id = 1; // List of node ID's (requesters) that this event relates to (is sent by it or its children)
+  optional uint64 id = 2; // system unique eventId (CDP eventId + handle)
+  optional string sender = 3; // event sender full name
   enum CodeFlags {
-    eAlarmSet = 1;                  // The alarm's Set flag/state was set. The alarm changed state to "Unack-Set" (The Unack flag was set if not already set)
+    aAlarmSet = 1;                  // The alarm's Set flag/state was set. The alarm changed state to "Unack-Set" (The Unack flag was set if not already set)
     eAlarmClr = 2;                  // The alarm's Set flag was cleared. The Unack state is unchanged.
     eAlarmAck = 4;                  // The alarm changed state from "Unacknowledged" to "Acknowledged". The Set state is unchanged.
     eReprise = 64;                  // A repetition/update of an event that has been reported before. Courtesy of late subscribers.
     eSourceObjectUnavailable = 256; // The provider of the event has become unavailable (disconnected or similar)
     eNodeBoot = 1073741824;         // The provider reports that the CDPEventNode just have booted.
   }
-  enum StatusFlags {
-    eStatusOK = 0x0;                 // No alarm set
-    eNotifySet = 0x1;                // NOTIFY alarm set
-    eWarningSet = 0x10;              // WARNING alarm set
-    eLowLevelSet = 0x20;             // LOW LEVEL alarm set
-    eHighLevelSet = 0x40;            // HIGH LEVEL alarm set
-    eErrorSet = 0x100;               // ERROR alarm set
-    eLowLowLevelSet = 0x200;         // LOW-LOW LEVEL alarm set
-    eHighHighLevelSet = 0x400;       // HIGH-HIGH LEVEL alarm set
-    eEmergencySet = 0x800;           // EMERGENCY LEVEL alarm present
-    eValueForced = 0x1000;           // Signal value was forced (overridden)
-    eRepeatBlocked = 0x2000;         // Alarm is blocked due to too many repeats
-    eProcessBlocked = 0x4000;        // Alarm is blocked by the software
-    eOperatorBlocked = 0x8000;       // Alarm is blocked by the user
-    eNotifyUnacked = 0x10000;        // NOTIFY alarm unacknowledged
-    eWarningUnacked = 0x100000;      // WARNING alarm unacknowledged
-    eErrorUnacked = 0x1000000;       // ERROR alarm unacknowledged
-    eEmergencyUnacked = 0x8000000;   // EMERGENCY alarm unacknowledged
-    eDisabled = 0x20000000;          // Alarm is disabled
-    eSignalFault = 0x40000000;       // Signal has fault condition
-    eComponentSuspended = 0x80000000;// Component is suspended
-  }
-  repeated uint32 node_id = 1; // List of node ID's (requesters) that this event relates to (is sent by it or its children)
-  optional uint64 id = 2; // system unique eventId (CDP eventId + handle)
-  optional string sender = 3; // event sender full name
   optional uint32 code = 4; // event code flags
   optional uint32 status = 5; // new status of the object caused event, after the event
   optional uint64 timestamp = 6; // time stamp, when this event was sent (in UTC nanotime)
@@ -289,7 +307,66 @@ message EventInfo {
     optional string value = 2;
   }
   repeated EventData data = 7;
+  optional string ack_handler_node_name = 8; // sender child node name that should be set to ack the alarm
+  repeated string ack_handler_param_data_names = 9; // EventData names, whose values should be posted to the ack handler node (in form of semicolon-separated list of name=value pairs)
   extensions 100 to max;
+}
+
+/**
+ * Generic Services Support - supported since compat_version=4.
+ *
+ * This allows users to register and handle custom services within a CDP application (using the
+ * "ICDPAdapter::GetCDPAdapter().GetServiceRegistry()" interface), and clients to discover
+ * and connect to these services. Services are application-specific, and their semantics and protocols are outside
+ * of the StudioAPI scope. StudioAPI only provides the discovery and connection management
+ * functionality. Service messages are exchanged using the ServiceMessage message type.
+ *
+ * Note, all service-related messages must be wrapped within the Container message.
+ */
+
+/**
+ * A request to get the list of available services, and optionally subscribe to changes.
+ * Sent by the client. The server responds with a ServicesNotification message.
+ */
+message ServicesRequest {
+  optional bool subscribe = 1; // If true, target must send ServicesNotification every time the list of services changes
+  optional bool stop = 2; // If true, target must stop sending any new ServicesNotifications
+  optional uint32 inactivity_resend_interval = 3; // Supported since compat_version=4. If provided, then server will start to
+                                                  // resend the current services list, whenever there were no changes
+                                                  // during given interval (in seconds), useful for confirmation that the
+                                                  // subscription is still alive and server is still able to send this info.
+}
+
+/**
+ * A response to ServicesRequest. Sent by the server to announce the available services.
+ * If subscribed, the message is resent every time the list changes.
+ */
+message ServicesNotification {
+  repeated ServiceInfo services = 1; // list of available services or empty if no services are available
+}
+
+message ServiceInfo {
+  optional uint64 service_id = 1; // unique ID (unique within one app). Matches ServiceMessage.service_id
+  optional string name = 2; // human-readable name
+  optional string type = 3; // service type, e.g. "websocketproxy"
+  map<string, string> metadata = 4; // optional extra data describing the service
+}
+
+/** The main message type for service communication */
+message ServiceMessage {
+  enum Kind {
+    eConnect = 0; // connects to a new service instance (sent by the client and the client sets the instance_id).
+                  // Note, requiring eConnect to be sent first is optional for a service,
+                  // services can allow sending eData directly without prior eConnect.
+    eConnected = 1; // response to eConnect (sent by the server and contains the same instance_id as the eConnect did)
+    eDisconnect = 2; // close and disconnect the service instance (can be sent by either client or server)
+    eData = 3; // fills payload with service-specific data (can be sent by either client or server)
+    eError = 4; // instance cannot be initialized or has an error (implies eDisconnect)
+  }
+  optional uint64 service_id = 1; // matches ServiceInfo.id
+  optional uint64 instance_id = 2 [default = 0]; // allows having multiple instances of a service
+  optional Kind kind = 3; // type of the message
+  optional bytes payload = 4; // message data - usually used with eData but any Kind may have a service-specific payload
 }
 `;
 

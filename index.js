@@ -72,102 +72,149 @@ var studio = (function() {
  * @namespace
  */
 studio.protocol = (function(ProtoBuf) {
-  var obj = {},
-        studioBuilder = ProtoBuf.loadProto(globalThis.p || p);
-  obj.Hello = studioBuilder.build("Hello");
-  obj.AuthRequest = studioBuilder.build("AuthRequest");
-  obj.AuthRequestChallengeResponse = studioBuilder.build("AuthRequest.ChallengeResponse");
-  obj.AdditionalChallengeResponseRequired = studioBuilder.build("AdditionalChallengeResponseRequired");
-  obj.AuthResponse = studioBuilder.build("AuthResponse");
-  obj.AuthResultCode = studioBuilder.build("AuthResponse.AuthResultCode");
-  obj.Container = studioBuilder.build("Container");
-  obj.ContainerType = studioBuilder.build("Container.Type");
-  obj.Error = studioBuilder.build("Error");
-  obj.RemoteErrorCode = studioBuilder.build("RemoteErrorCode");
-  obj.CDPNodeType = studioBuilder.build("CDPNodeType");
-  obj.CDPValueType = studioBuilder.build("CDPValueType");
-  obj.Info = studioBuilder.build("Info");
-  obj.InfoFlags = studioBuilder.build("Info.Flags");
-  obj.Node = studioBuilder.build("Node");
-  obj.VariantValue = studioBuilder.build("VariantValue");
-  obj.ValueRequest = studioBuilder.build("ValueRequest");
-  obj.EventRequest = studioBuilder.build("EventRequest");
-  obj.EventInfo = studioBuilder.build("EventInfo");
-  obj.EventCode = studioBuilder.build("EventInfo.CodeFlags");
-  obj.EventStatus = studioBuilder.build("EventInfo.StatusFlags");
-  obj.ChildAdd = studioBuilder.build("ChildAdd");
-  obj.ChildRemove = studioBuilder.build("ChildRemove");
+  var obj = {};
+
+  // protobufjs v7.x
+  var protoDefinition;
+  if (typeof globalThis !== 'undefined' && typeof globalThis.p !== 'undefined') {
+    protoDefinition = globalThis.p;
+  } else if (typeof window !== 'undefined' && (window.studioapiProto || window.p)) {
+    protoDefinition = window.studioapiProto || window.p;
+  } else if (typeof p !== 'undefined') {
+    protoDefinition = p;
+  } else {
+    throw new Error('StudioAPI proto definition not found (expected globalThis.p or window.studioapiProto)');
+  }
+  var parsed = ProtoBuf.parse(protoDefinition);
+  var root = parsed.root;
+
+  // Helper functions for safe type/enum lookup
+  var type = function(n) {
+    try {
+      return root.lookupType(n);
+    } catch (e) {
+      return root.lookupType(n.split('.').pop());
+    }
+  };
+
+  var en = function(n) {
+    try {
+      return root.lookupEnum(n).values;
+    } catch (e) {
+      return root.lookupEnum(n.split('.').pop()).values;
+    }
+  };
+
+  obj.Hello = type('Hello');
+  obj.AuthRequest = type('AuthRequest');
+  obj.AuthRequestChallengeResponse = type('AuthRequest.ChallengeResponse');
+  obj.AdditionalChallengeResponseRequired = type('AdditionalChallengeResponseRequired');
+  obj.AuthResponse = type('AuthResponse');
+  obj.AuthResultCode = en('AuthResponse.AuthResultCode');
+  obj.Container = type('Container');
+  obj.ContainerType = en('Container.Type');
+  obj.Error = type('Error');
+  obj.RemoteErrorCode = en('RemoteErrorCode');
+  obj.CDPNodeType = en('CDPNodeType');
+  obj.CDPValueType = en('CDPValueType');
+  obj.Info = type('Info');
+  obj.InfoFlags = en('Info.Flags');
+  obj.Node = type('Node');
+  obj.VariantValue = type('VariantValue');
+  obj.ValueRequest = type('ValueRequest');
+  obj.EventRequest = type('EventRequest');
+  obj.EventInfo = type('EventInfo');
+  obj.EventCode = en('EventInfo.CodeFlags');
+  obj.ChildAdd = type('ChildAdd');
+  obj.ChildRemove = type('ChildRemove');
+  obj.ServicesRequest = type('ServicesRequest');
+  obj.ServicesNotification = type('ServicesNotification');
+  obj.ServiceInfo = type('ServiceInfo');
+  obj.ServiceMessage = type('ServiceMessage');
+  obj.ServiceMessageKind = en('ServiceMessage.Kind');
 
   obj.valueToVariant = function (variantValue, type, value) {
     switch (type) {
       case obj.CDPValueType.eDOUBLE:
         variantValue.d_value = value;
+        variantValue.dValue = value;
         break;
       case obj.CDPValueType.eFLOAT:
         variantValue.f_value = value;
+        variantValue.fValue = value;
         break;
       case obj.CDPValueType.eUINT64:
         variantValue.ui64_value = value;
+        variantValue.ui64Value = value;
         break;
       case obj.CDPValueType.eINT64:
         variantValue.i64_value = value;
+        variantValue.i64Value = value;
         break;
       case obj.CDPValueType.eUINT:
         variantValue.ui_value = value;
+        variantValue.uiValue = value;
         break;
       case obj.CDPValueType.eINT:
         variantValue.i_value = value;
+        variantValue.iValue = value;
         break;
       case obj.CDPValueType.eUSHORT:
         variantValue.us_value = value;
+        variantValue.usValue = value;
         break;
       case obj.CDPValueType.eSHORT:
         variantValue.s_value = value;
+        variantValue.sValue = value;
         break;
       case obj.CDPValueType.eUCHAR:
         variantValue.uc_value = value;
+        variantValue.ucValue = value;
         break;
       case obj.CDPValueType.eCHAR:
         variantValue.c_value = value;
+        variantValue.cValue = value;
         break;
       case obj.CDPValueType.eBOOL:
         variantValue.b_value = value;
+        variantValue.bValue = value;
         break;
       case obj.CDPValueType.eSTRING:
         variantValue.str_value = value;
+        variantValue.strValue = value;
         break;
     }
   };
 
   obj.valueFromVariant = function(variantValue, type) {
-  switch(type) {
-    case obj.CDPValueType.eDOUBLE:
-      return variantValue.d_value;
-    case obj.CDPValueType.eFLOAT:
-      return variantValue.f_value;
-    case obj.CDPValueType.eUINT64:
-      return variantValue.ui64_value;
-    case obj.CDPValueType.eINT64:
-      return variantValue.i64_value;
-    case obj.CDPValueType.eUINT:
-      return variantValue.ui_value;
-    case obj.CDPValueType.eINT:
-      return variantValue.i_value;
-    case obj.CDPValueType.eUSHORT:
-      return variantValue.us_value;
-    case obj.CDPValueType.eSHORT:
-      return variantValue.s_value;
-    case obj.CDPValueType.eUCHAR:
-      return variantValue.uc_value;
-    case obj.CDPValueType.eCHAR:
-      return variantValue.c_value;
-    case obj.CDPValueType.eBOOL:
-      return variantValue.b_value;
-    case obj.CDPValueType.eSTRING:
-      return variantValue.str_value;
-    default:
-      return 0;
-  }
+    switch(type) {
+      case obj.CDPValueType.eDOUBLE:
+        return variantValue.d_value ?? variantValue.dValue;
+      case obj.CDPValueType.eFLOAT:
+        return variantValue.f_value ?? variantValue.fValue;
+      case obj.CDPValueType.eUINT64:
+        return variantValue.ui64_value ?? variantValue.ui64Value;
+      case obj.CDPValueType.eINT64:
+        return variantValue.i64_value ?? variantValue.i64Value;
+      case obj.CDPValueType.eUINT:
+        return variantValue.ui_value ?? variantValue.uiValue;
+      case obj.CDPValueType.eINT:
+        return variantValue.i_value ?? variantValue.iValue;
+      case obj.CDPValueType.eUSHORT:
+        return variantValue.us_value ?? variantValue.usValue;
+      case obj.CDPValueType.eSHORT:
+        return variantValue.s_value ?? variantValue.sValue;
+      case obj.CDPValueType.eUCHAR:
+        return variantValue.uc_value ?? variantValue.ucValue;
+      case obj.CDPValueType.eCHAR:
+        return variantValue.c_value ?? variantValue.cValue;
+      case obj.CDPValueType.eBOOL:
+        return variantValue.b_value ?? variantValue.bValue;
+      case obj.CDPValueType.eSTRING:
+        return variantValue.str_value ?? variantValue.strValue;
+      default:
+        return 0;
+    }
   };
 
   obj.appendBuffer = function ( array1, array2 ) {
@@ -179,27 +226,44 @@ studio.protocol = (function(ProtoBuf) {
 
   obj.CreateAuthRequest = function (dict, challenge) {
     return new Promise(function(resolve, reject) {
-      var authReq = new obj.AuthRequest();
       var username = dict.Username || '';
       var password = dict.Password || '';
-      var credentials = new TextEncoder().encode(username.toLowerCase() + ':' + password); // encode to utf-8 byte array
-      authReq.user_id = username.toLowerCase();
+
+      // Handle empty challenge case - create a simple auth request without challenge response
+      if (!challenge || challenge.length === 0) {
+        var authReq = obj.AuthRequest.create({
+          userId: username.toLowerCase(),
+          challengeResponse: []
+        });
+        resolve(authReq);
+        return;
+      }
+
+      // Handle non-empty challenge with proper hashing
+      var credentials = new TextEncoder().encode(username.toLowerCase() + ':' + password);
+
       crypto.subtle.digest('SHA-256', credentials.buffer)
         .then(function(digest) {
-          var colon = new Int8Array([':'.charCodeAt(0)]);
-          var buffer = obj.appendBuffer(obj.appendBuffer(challenge.buffer.slice(challenge.offset, challenge.limit), colon.buffer), digest);
+          var colon = new Uint8Array([58]);
+          var challengeBytes = challenge instanceof Uint8Array ? challenge : new Uint8Array(challenge);
+          var buffer = obj.appendBuffer(obj.appendBuffer(challengeBytes, colon.buffer), digest);
           return crypto.subtle.digest('SHA-256', buffer)
         })
         .then(function(challenge_digest) {
-          var response = new obj.AuthRequestChallengeResponse();
-          response.type = "PasswordHash";
-          response.response = new Uint8Array(challenge_digest);
-          authReq.challenge_response = [];
-          authReq.challenge_response.push(response);
+          var response = obj.AuthRequestChallengeResponse.create({
+            type: "PasswordHash",
+            response: new Uint8Array(challenge_digest)
+          });
+
+          var authReq = obj.AuthRequest.create({
+            userId: username.toLowerCase(),
+            challengeResponse: [response]
+          });
+
           resolve(authReq);
         })
         .catch(function(err){
-          reject(err)
+          reject(err);
         });
     });
   }
@@ -219,13 +283,13 @@ studio.protocol = (function(ProtoBuf) {
     this.metadata = metadata;
     this.handle = function(message){
       return new Promise(function(resolve, reject) {
-
         try {
-          var container = obj.Container.decode(message);
+          var container = obj.Container.decode(new Uint8Array(message));
         } catch (err) {
           console.log("Container Error: "+err+"\n");
           onError();
           resolve(new ErrorHandler());
+          return;
         }
         onContainer(container, metadata);
         resolve(this);
@@ -245,7 +309,11 @@ studio.protocol = (function(ProtoBuf) {
           return obj.CreateAuthRequest(dict, metadata.challenge);
         })
         .then(function(request){
-          socket.send(request.toArrayBuffer());
+          var container = obj.Container.create({
+            messageType: obj.ContainerType.eReauthRequest,
+            reAuthRequest: request
+          });
+          socket.send(obj.Container.encode(container).finish());
         })
         .catch(function(err){
           console.log("Authentication cancelled.", err)
@@ -254,24 +322,36 @@ studio.protocol = (function(ProtoBuf) {
 
     this.handle = function(message){
       return new Promise(function(resolve, reject) {
-
         try {
-          var authResponse = obj.AuthResponse.decode(message);
+          var authResponse = obj.AuthResponse.decode(new Uint8Array(message));
         } catch (err) {
           console.log("AuthResponse Error: "+err+"\n");
           onError();
           resolve(new ErrorHandler());
+          return;
         }
 
-        if (authResponse.result_code == obj.AuthResultCode.eGranted)
+        if (authResponse.resultCode == obj.AuthResultCode.eGranted)
         {
-          var container = new obj.Container();
-          container.message_type = obj.ContainerType.eStructureRequest;
-          socket.send(container.toArrayBuffer());
-          resolve(new ContainerHandler(onContainer, onError, metadata));
+          var container = obj.Container.create({
+            messageType: obj.ContainerType.eStructureRequest
+          });
+          socket.send(obj.Container.encode(container).finish());
+
+          // Send ServicesRequest to subscribe to services (for proxy protocol, compat >= 4)
+          if (metadata.compatVersion >= 4) {
+            var servicesReq = obj.Container.create({
+              messageType: obj.ContainerType.eServicesRequest,
+              servicesRequest: obj.ServicesRequest.create({ subscribe: true })
+            });
+            socket.send(obj.Container.encode(servicesReq).finish());
+          }
+
+          var containerHandler = new ContainerHandler(onContainer, onError, metadata);
+          resolve(containerHandler);
         } else {
-          console.log("Unable to login with existing user, password.", authResponse.result_text);
-          var userAuthResult = new studio.api.UserAuthResult(authResponse.result_code, authResponse.result_text);
+          console.log("Unable to login with existing user, password.", authResponse.resultText);
+          var userAuthResult = new studio.api.UserAuthResult(authResponse.resultCode, authResponse.resultText);
           this.sendAuthRequest(userAuthResult);
           resolve(this);
         }
@@ -285,28 +365,35 @@ studio.protocol = (function(ProtoBuf) {
     this.handle = function(message){
       return new Promise(function(resolve, reject) {
         try {
-          var hello = obj.Hello.decode(message);
+          var hello = obj.Hello.decode(new Uint8Array(message));
         } catch (err) {
           console.log("Hello Error: "+err+"\n");
           onError();
           resolve(new ErrorHandler());
+          return;
         }
 
         function applicationAcceptanceRequested(request){
           return new Promise(function(resolve, reject) {
-            if (request.systemUseNotification())
-              window.confirm(metadata.systemUseNotification) ? resolve() : reject();
-            else
+            if (request.systemUseNotification()) {
+              if (typeof window !== 'undefined' && window.confirm) {
+                window.confirm(metadata.systemUseNotification) ? resolve() : reject();
+              } else {
+                resolve();
+              }
+            } else {
               resolve();
+            }
           });
         }
 
         var metadata = {}
-        metadata.systemName = hello.system_name;
-        metadata.applicationName = hello.application_name;
-        metadata.cdpVersion = hello.cdp_version_major + '.' + hello.cdp_version_minor + '.' + hello.cdp_version_patch;
-        metadata.systemUseNotification = hello.system_use_notification;
+        metadata.systemName = hello.systemName;
+        metadata.applicationName = hello.applicationName;
+        metadata.cdpVersion = hello.cdpVersionMajor + '.' + hello.cdpVersionMinor + '.' + hello.cdpVersionPatch;
+        metadata.systemUseNotification = hello.systemUseNotification;
         metadata.challenge = hello.challenge;
+        metadata.compatVersion = hello.compatVersion || hello.compat_version || 2;
 
         var request = new studio.api.Request(metadata.systemName, metadata.applicationName, metadata.cdpVersion, metadata.systemUseNotification, null);
         var applicationAccepted = {}
@@ -318,7 +405,7 @@ studio.protocol = (function(ProtoBuf) {
 
         applicationAccepted(request)
           .then(function(){
-            if (hello.challenge) {
+            if (hello.challenge && hello.challenge.length > 0) {
               if (!notificationListener || !notificationListener.credentialsRequested)
               {
                 console.log("No notificationListener.credentialsRequested callback provided to studio.api.Client constructor. Can't authenticate connection!");
@@ -332,9 +419,20 @@ studio.protocol = (function(ProtoBuf) {
               resolve(authHandler);
             }
             else {
-              var container = new obj.Container();
-              container.message_type = obj.ContainerType.eStructureRequest;
-              socket.send(container.toArrayBuffer());
+              var container = obj.Container.create({
+                messageType: obj.ContainerType.eStructureRequest
+              });
+              socket.send(obj.Container.encode(container).finish());
+
+              // Send ServicesRequest to subscribe to services (for proxy protocol, compat >= 4)
+              if (metadata.compatVersion >= 4) {
+                var servicesReq = obj.Container.create({
+                  messageType: obj.ContainerType.eServicesRequest,
+                  servicesRequest: obj.ServicesRequest.create({ subscribe: true })
+                });
+                socket.send(obj.Container.encode(servicesReq).finish());
+              }
+
               resolve(new ContainerHandler(onContainer, onError, metadata));
             }
           })
@@ -381,6 +479,25 @@ studio.internal = (function(proto) {
     REMOVE: 0,
     ADD: 1
   };
+
+  // Normalize Info fields for protobufjs v5/v7 compatibility
+  function normalizeInfo(info) {
+    if (!info) return info;
+    // Mirror camelCase to snake_case if missing (and vice versa)
+    info.is_local  = info.is_local  ?? info.isLocal;
+    info.isLocal   = info.isLocal   ?? info.is_local;
+
+    info.type_name = info.type_name ?? info.typeName;
+    info.typeName  = info.typeName  ?? info.type_name;
+
+    info.node_type = info.node_type ?? info.nodeType;
+    info.nodeType  = info.nodeType  ?? info.node_type;
+
+    info.value_type = info.value_type ?? info.valueType;
+    info.valueType  = info.valueType  ?? info.value_type;
+
+    return info;
+  }
 
   function AppNode(appConnection, nodeId) {
     var parent = undefined;
@@ -453,8 +570,8 @@ studio.internal = (function(proto) {
 
     this.update = function(nodeParent, protoInfo) {
       parent = nodeParent;
-      lastInfo = protoInfo;
-      id = protoInfo.node_id;
+      lastInfo = normalizeInfo(protoInfo);
+      id = protoInfo.nodeId;
       this.async._makeGetterRequest();
       for (var i = 0; i < eventSubscriptions.length; i++)
         app.makeEventRequest(id, eventSubscriptions[i][1], false);
@@ -491,9 +608,9 @@ studio.internal = (function(proto) {
       });
       givenPromises.clear();
 
-      for (var i = 0; i < childIterators.length; i++) {
-        childMap.forEach(childIterators[i]);
-        childIterators.splice(i, 1);
+      while (childIterators.length > 0) {
+        var it = childIterators.shift();
+        childMap.forEach(it);
       }
     };
 
@@ -613,6 +730,11 @@ studio.internal = (function(proto) {
         var appConnection = new obj.AppConnection(url, notificationListener, autoConnect);
         appConnections.push(appConnection);
         var sys = appConnection.root();
+
+        appConnection.onServiceConnectionEstablished = function(serviceConnection) {
+          appConnections.push(serviceConnection);
+        };
+
         sys.async.onDone(resolve, reject, sys);
       });
     };
@@ -632,22 +754,12 @@ studio.internal = (function(proto) {
       pendingConnects.push({resolve: resolve, reject: reject});
 
       this.onAppConnect(studioURL, notificationListener, autoConnect).then(function(system){
-        var promises = [];
-        system.forEachChild(function (app) {
-          if (!app.info().is_local)
-          {
-            var appUrl = app.info().server_addr + ":" + app.info().server_port;
-            promises.push(this_.onAppConnect(appUrl, notificationListener, autoConnect));
-          }
+        pendingConnects.forEach(function(con) {
+          con.resolve(this_);
         });
-        Promise.all(promises).then(function() {
-          pendingConnects.forEach(function(con) {
-            con.resolve(this_);
-          });
-          pendingConnects = [];
-          connecting = false;
-          connected = true;
-        });
+        pendingConnects = [];
+        connecting = false;
+        connected = true;
       }, reject);
     }
 
@@ -655,8 +767,7 @@ studio.internal = (function(proto) {
       var nodes = [];
       appConnections.forEach(function(con) {
         con.root().forEachChild(function(app) {
-          if (app.info().is_local)
-            nodes.push(app);
+          nodes.push(app);
         });
       });
       return nodes;
@@ -698,17 +809,15 @@ studio.internal = (function(proto) {
 
     this.async.fetch = function() {
       this.applicationNodes().forEach(function (app) {
-        pendingFetches.push(app);
-        app.fetch();
+        if (app.async && typeof app.async.fetch === 'function') {
+          app.async.fetch();
+        }
       });
     };
 
     this.async.onDone = function(resolve, reject, apiNode) {
-      const index = pendingFetches.indexOf(apiNode);
-      if (index > -1) {
-        pendingFetches[index].onDone(resolve, reject, apiNode);
-        pendingFetches.splice(index, 1);
-      }
+      // System node resolves immediately; child nodes manage their own onDone
+      resolve(apiNode);
     };
 
     this.async.subscribeToValues = function(valueConsumer, fs=5, sampleRate=0) {
@@ -729,25 +838,29 @@ studio.internal = (function(proto) {
 
     this.async.subscribeToStructure = function(structureConsumer) {
       this.applicationNodes().forEach(function (app) {
-        app.subscribeToStructure(structureConsumer);
+        if (app.async && typeof app.async.subscribeToStructure === 'function')
+          app.async.subscribeToStructure(structureConsumer);
       });
     };
 
     this.async.unsubscribeFromStructure = function(structureConsumer) {
       this.applicationNodes().forEach(function (app) {
-        app.unsubscribeFromStructure(structureConsumer);
+        if (app.async && typeof app.async.unsubscribeFromStructure === 'function')
+          app.async.unsubscribeFromStructure(structureConsumer);
       });
     };
 
     this.async.subscribeToEvents = function(eventConsumer, startingFrom) {
       this.applicationNodes().forEach(function (app) {
-        app.subscribeToEvents(eventConsumer, startingFrom);
+        if (app.async && typeof app.async.subscribeToEvents === 'function')
+          app.async.subscribeToEvents(eventConsumer, startingFrom);
       });
     };
 
     this.async.unsubscribeFromEvents = function(eventConsumer) {
       this.applicationNodes().forEach(function (app) {
-        app.unsubscribeFromEvents(eventConsumer);
+        if (app.async && typeof app.async.unsubscribeFromEvents === 'function')
+          app.async.unsubscribeFromEvents(eventConsumer);
       });
     };
 
@@ -764,13 +877,53 @@ studio.internal = (function(proto) {
     };
   };
 
-  obj.AppConnection = function(url, notificationListener, autoConnect) {
+  // Transport abstraction for WebSocket and Service multiplexing
+  function Transport() {
+    this.onopen = null;
+    this.onmessage = null;
+    this.onclose = null;
+    this.onerror = null;
+  }
+  Transport.prototype.send = function(bytes) { throw new Error("send not implemented"); };
+  Transport.prototype.close = function() { throw new Error("close not implemented"); };
+
+  function WebSocketTransport(url, binaryType) {
+    Transport.call(this);
+    this.ws = new WebSocket(url);
+    this.ws.binaryType = binaryType || "arraybuffer";
+    var self = this;
+    this.ws.onopen = function(e) { self.onopen && self.onopen(e); };
+    this.ws.onmessage = function(e) { self.onmessage && self.onmessage(e); };
+    this.ws.onclose = function(e) { self.onclose && self.onclose(e); };
+    this.ws.onerror = function(e) { self.onerror && self.onerror(e); };
+  }
+  WebSocketTransport.prototype = Object.create(Transport.prototype);
+  WebSocketTransport.prototype.constructor = WebSocketTransport;
+  WebSocketTransport.prototype.send = function(bytes) { 
+    if (this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(bytes); 
+    }
+  };
+  WebSocketTransport.prototype.close = function() { this.ws.close(); };
+
+  obj.AppConnection = function(urlOrTransport, notificationListener, autoConnect) {
     var appConnection = this;
     var appName = "";
     var appId = undefined;
-    var appUrl = composeUrl(url);
-    var socket = new WebSocket(appUrl);
-    var handler = new proto.Handler(socket, notificationListener);
+    var socketTransport;
+    var isPrimaryConnection = false; // true for direct WebSocket, false for ServiceTransport (proxied)
+
+    // Accept either URL string or Transport object
+    if (typeof urlOrTransport === 'string') {
+      var appUrl = composeUrl(urlOrTransport);
+      socketTransport = new WebSocketTransport(appUrl, proto.BINARY_TYPE);
+      isPrimaryConnection = true; // Direct WebSocket = primary connection
+    } else {
+      socketTransport = urlOrTransport; // assumed to be Transport (proxied connection)
+      isPrimaryConnection = false; // ServiceTransport = proxied, don't create more proxies
+    }
+
+    var handler = new proto.Handler(socketTransport, notificationListener);
     var requests = [];
     var nodeMap = new Map();
     var systemNode = new AppNode(appConnection, proto.SYSTEM_NODE_ID);
@@ -779,7 +932,10 @@ studio.internal = (function(proto) {
     var onError;
     var onOpen;
     var reauthRequestPending = false;
-    socket.binaryType = proto.BINARY_TYPE;
+    var availableServices = new Map(); // service_id -> ServiceInfo
+    var serviceConnections = new Map(); // service_id -> connection object
+    var serviceInstances = new Map(); // instance key (service_id:instance_id) -> handlers
+    var instanceCounters = new Map(); // service_id -> next instance counter
     nodeMap.set(systemNode.id(), systemNode);
     handler.onContainer = handleIncomingContainer;
     this.resubscribe = function(item) {
@@ -799,9 +955,137 @@ studio.internal = (function(proto) {
       return nodeMap.get(proto.SYSTEM_NODE_ID);
     };
 
+    function allocateInstanceId(serviceId) {
+      var current = instanceCounters.get(serviceId) || 0;
+      var next = current + 1;
+      instanceCounters.set(serviceId, next);
+      return next;
+    }
+
+    function makeServiceTransport(serviceId, notificationListener, autoConnect) {
+      var transport = new Transport();
+      var instanceId = allocateInstanceId(serviceId);
+      var instanceKey = serviceId + ':' + instanceId;
+
+      serviceInstances.set(instanceKey, {
+        onMessage: function(serviceMsg, metadata) {
+          if (serviceMsg.kind === proto.ServiceMessageKind.eConnected) {
+            transport.onopen && transport.onopen({});
+            return;
+          }
+          if (serviceMsg.kind === proto.ServiceMessageKind.eData) {
+            // Deliver raw payload bytes as WebSocket frame
+            transport.onmessage && transport.onmessage({ data: serviceMsg.payload });
+            return;
+          }
+          if (serviceMsg.kind === proto.ServiceMessageKind.eDisconnect ||
+              serviceMsg.kind === proto.ServiceMessageKind.eError) {
+            transport.onclose && transport.onclose({ code: 1000, reason: 'Service closed' });
+            serviceInstances.delete(instanceKey);
+            return;
+          }
+        }
+      });
+
+      appConnection.sendServiceMessage(serviceId, instanceId, proto.ServiceMessageKind.eConnect);
+
+      transport.send = function(bytes) {
+        appConnection.sendServiceMessage(serviceId, instanceId, proto.ServiceMessageKind.eData, bytes);
+      };
+
+      transport.close = function() {
+        appConnection.sendServiceMessage(serviceId, instanceId, proto.ServiceMessageKind.eDisconnect);
+        serviceInstances.delete(instanceKey);
+      };
+
+      return { transport: transport, instanceId: instanceId };
+    }
+
+    this.onServicesReceived = function(services, metadata) {
+      availableServices.clear();
+      var compatVersion = metadata.compatVersion || 2;
+
+      // Only primary connection creates proxy connections (prevents infinite loop)
+      if (!isPrimaryConnection) {
+        for (var i = 0; i < services.length; i++) {
+          availableServices.set(services[i].serviceId, services[i]);
+        }
+        return;
+      }
+
+      for (var i = 0; i < services.length; i++) {
+        var service = services[i];
+        availableServices.set(service.serviceId, service);
+
+        var isProxyService = service.type === 'websocketproxy' ||
+                             service.type === 'studioapi' ||
+                             service.type === 'logserver';
+
+        if (isProxyService && compatVersion >= 4) {
+          var result = makeServiceTransport(service.serviceId, notificationListener, autoConnect);
+          var proxyConnection = new obj.AppConnection(result.transport, notificationListener, autoConnect);
+          serviceConnections.set(service.serviceId, proxyConnection);
+
+          if (appConnection.onServiceConnectionEstablished) {
+            appConnection.onServiceConnectionEstablished(proxyConnection);
+          }
+        } else if (service.metadata && service.metadata.ip_address && service.metadata.port) {
+          var serviceUrl = service.metadata.ip_address + ':' + service.metadata.port;
+          appConnection.connectToService(service, serviceUrl, metadata);
+        }
+      }
+    };
+
+    this.onServiceMessage = function(serviceMessage, metadata) {
+      var instanceKey = serviceMessage.serviceId + ':' + (serviceMessage.instanceId || 0);
+      var handler = serviceInstances.get(instanceKey);
+
+      if (handler && handler.onMessage) {
+        handler.onMessage(serviceMessage, metadata);
+      }
+    };
+
+    this.connectToService = function(serviceInfo, serviceUrl, metadata) {
+      if (serviceInfo.type === 'studioapi' && !serviceConnections.has(serviceInfo.serviceId)) {
+        var proxyConnection = new obj.AppConnection(serviceUrl, notificationListener, autoConnect);
+        serviceConnections.set(serviceInfo.serviceId, proxyConnection);
+
+        if (appConnection.onServiceConnectionEstablished) {
+          appConnection.onServiceConnectionEstablished(proxyConnection);
+        }
+
+        return proxyConnection;
+      }
+      return null;
+    };
+
+    this.getAvailableServices = function() {
+      return Array.from(availableServices.values());
+    };
+
+    this.sendServiceMessage = function(serviceId, instanceId, kind, payload) {
+      var serviceMessage = proto.ServiceMessage.create({
+        serviceId: serviceId,
+        instanceId: instanceId || 0,
+        kind: kind
+      });
+      if (payload) {
+        serviceMessage.payload = payload;
+      }
+
+      var msg = proto.Container.create({
+        messageType: proto.ContainerType.eServiceMessage,
+        serviceMessage: [serviceMessage]
+      });
+
+      send(proto.Container.encode(msg).finish());
+    };
+
     onMessage = function(evt) { handler.handle(evt.data); };
-    onError = function (ev) { console.log("Socket error: " + ev.data); };
-    onOpen = function() { appConnection.resubscribe(systemNode); };
+    onError = function (ev) { console.log("Socket error:", ev); };
+    onOpen = function() {
+      appConnection.resubscribe(systemNode);
+    };
     onClosed = function (event) {
       var reason;
 
@@ -839,27 +1123,28 @@ studio.internal = (function(proto) {
       if (autoConnect)
       {
         setTimeout(function () {
-          console.log("Trying to reconnect", appUrl);
-          socket = new WebSocket(appUrl);
-          handler = new proto.Handler(socket, notificationListener);
-          handler.onContainer = handleIncomingContainer;
-          socket.binaryType = proto.BINARY_TYPE;
-          socket.onopen = onOpen;
-          socket.onclose = onClosed;
-          socket.onmessage = onMessage;
-          socket.onerror = onError;
+          if (typeof urlOrTransport === 'string') {
+            console.log("Trying to reconnect", appUrl);
+            socketTransport = new WebSocketTransport(appUrl, proto.BINARY_TYPE);
+            handler = new proto.Handler(socketTransport, notificationListener);
+            handler.onContainer = handleIncomingContainer;
+            socketTransport.onopen = onOpen;
+            socketTransport.onclose = onClosed;
+            socketTransport.onmessage = onMessage;
+            socketTransport.onerror = onError;
+          }
         }, 3000);
       }
     };
 
-    socket.onopen = onOpen;
-    socket.onclose = onClosed;
-    socket.onmessage = onMessage;
-    socket.onerror = onError;
+    socketTransport.onopen = onOpen;
+    socketTransport.onclose = onClosed;
+    socketTransport.onmessage = onMessage;
+    socketTransport.onerror = onError;
 
     function composeUrl(url) {
-      var result = (location.protocol=="https:" ? proto.WSS_PREFIX : proto.WS_PREFIX) + url; //default
-      if (URL.canParse(url)) {
+      var result = (typeof location !== 'undefined' && location.protocol=="https:" ? proto.WSS_PREFIX : proto.WS_PREFIX) + url; //default
+      try {
         var u = new URL(url);
         if (u.protocol && u.host) {
           if (u.protocol=="https:")
@@ -869,125 +1154,146 @@ studio.internal = (function(proto) {
           else
            result = u.origin;
         }
+      } catch (_) { 
+        // Keep default result
       }
       return result;
     }
 
     function send(message) {
-      if (socket.readyState == WebSocket.OPEN) {
-        socket.send(message.toArrayBuffer());
-      } else {
-        requests.push(message.toArrayBuffer());
-      }
+      // message is now already encoded as Uint8Array
+      if (!message || !message.byteLength) return;
+      socketTransport.send(message);
     }
 
     function flushRequests() {
       for (var i = 0; i < requests.length; i++) {
-        socket.send(requests[i]);
+        socketTransport.send(requests[i]);
       }
       requests = [];
     }
 
     this.makeStructureRequest = function(id) {
-      var msg = new proto.Container();
-      msg.message_type = proto.ContainerType.eStructureRequest;
+      var msgData = {
+        messageType: proto.ContainerType.eStructureRequest
+      };
       if (id != proto.SYSTEM_NODE_ID) {
-        msg.structure_request = [];
-        msg.structure_request.push(id);
+        msgData.structureRequest = [id];
       }
-      send(msg);
+
+      var msg = proto.Container.create(msgData);
+      send(proto.Container.encode(msg).finish());
     };
 
     this.makeGetterRequest = function(id, fs, sampleRate, stop) {
-      var msg = new proto.Container();
-      var request = new proto.ValueRequest();
-      request.node_id = id;
-      request.fs = fs;
+      var requestData = {
+        nodeId: id,
+        fs: fs
+      };
       if (sampleRate) {
-        request.sample_rate = sampleRate;
+        requestData.sampleRate = sampleRate;
       }
       if (stop) {
-        request.stop = stop;
+        requestData.stop = stop;
       }
-      msg.message_type = proto.ContainerType.eGetterRequest;
-      msg.getter_request = [request];
-      send(msg);
+      var request = proto.ValueRequest.create(requestData);
+
+      var msg = proto.Container.create({
+        messageType: proto.ContainerType.eGetterRequest,
+        getterRequest: [request]
+      });
+      send(proto.Container.encode(msg).finish());
     };
 
     this.makeEventRequest = function(id, startingFrom, stop) {
-      var msg = new proto.Container();
-      var request = new proto.EventRequest();
-      request.node_id = id;
+      var requestData = {
+        nodeId: id
+      };
       if (stop) {
-        request.stop = stop;
+        requestData.stop = stop;
       }
       if (startingFrom != undefined) {
-        request.starting_from = startingFrom;
+        requestData.startingFrom = startingFrom;
       }
-      msg.message_type = proto.ContainerType.eEventRequest;
-      msg.event_request = [request];
-      send(msg);
+      var request = proto.EventRequest.create(requestData);
+
+      var msg = proto.Container.create({
+        messageType: proto.ContainerType.eEventRequest,
+        eventRequest: [request]
+      });
+      send(proto.Container.encode(msg).finish());
     };
 
     this.makeChildAddRequest = function(id, name, modelName){
-      var msg = new proto.Container();
-      var request = new proto.ChildAdd();
-      request.parent_node_id = id;
-      request.child_name = name;
-      request.child_type_name = modelName;
-      msg.message_type = proto.ContainerType.eChildAddRequest;
-      msg.child_add_request = [request];
-      send(msg);
+      var request = proto.ChildAdd.create({
+        parentNodeId: id,
+        childName: name,
+        childTypeName: modelName
+      });
+
+      var msg = proto.Container.create({
+        messageType: proto.ContainerType.eChildAddRequest,
+        childAddRequest: [request]
+      });
+      send(proto.Container.encode(msg).finish());
     }
 
     this.makeChildRemoveRequest = function(id, name){
-      var msg = new proto.Container();
-      var request = new proto.ChildRemove();
-      request.parent_node_id = id;
-      request.child_name = name;
-      msg.message_type = proto.ContainerType.eChildRemoveRequest;
-      msg.child_remove_request = [request];
-      send(msg);
+      var request = proto.ChildRemove.create({
+        parentNodeId: id,
+        childName: name
+      });
+
+      var msg = proto.Container.create({
+        messageType: proto.ContainerType.eChildRemoveRequest,
+        childRemoveRequest: [request]
+      });
+      send(proto.Container.encode(msg).finish());
     }
 
     this.makeSetterRequest = function(id, type, value, timestamp) {
-      var msg = new proto.Container();
-      var request = new proto.VariantValue();
-      request.node_id = id;
+      var requestData = {
+        nodeId: id
+      };
       if (timestamp) {
-        request.timestamp = timestamp;
+        requestData.timestamp = timestamp;
       }
+      var request = proto.VariantValue.create(requestData);
       proto.valueToVariant(request, type, value);
-      msg.message_type = proto.ContainerType.eSetterRequest;
-      msg.setter_request = [request];
-      send(msg);
+
+      var msg = proto.Container.create({
+        messageType: proto.ContainerType.eSetterRequest,
+        setterRequest: [request]
+      });
+      send(proto.Container.encode(msg).finish());
     };
 
     function makeReauthRequest(dict, challenge) {
       proto.CreateAuthRequest(dict, challenge)
         .then(function(request){
-          var msg = new proto.Container();
-          msg.message_type = proto.ContainerType.eReauthRequest;
-          msg.re_auth_request = request;
-          send(msg);
+          var msg = proto.Container.create({
+            messageType: proto.ContainerType.eReauthRequest,
+            reAuthRequest: request
+          });
+          send(proto.Container.encode(msg).finish());
           reauthRequestPending = true;
         })
     };
 
     function addChildNode(parentNode, protoNode) {
-      var newNode = new AppNode(appConnection, protoNode.info.node_id);
+      var newNode = new AppNode(appConnection, protoNode.info.nodeId);
       newNode.update(parentNode, protoNode.info);
-      nodeMap.set(protoNode.info.node_id, newNode);
+      nodeMap.set(protoNode.info.nodeId, newNode);
       parentNode.add(newNode);
     }
 
     function parseChildNode(parentNode, protoNode) {
       var node = parentNode.child(protoNode.info.name);
       if (node) {
-        if (node.id() != protoNode.info.node_id) {
+        if (node.id() != protoNode.info.nodeId) {
           //node id has changed after reconnect
           nodeMap.delete(node.id());
-          nodeMap.set(protoNode.info.node_id, node);
+          nodeMap.set(protoNode.info.nodeId, node);
         }
         node.update(parentNode, protoNode.info);
       } else {
@@ -1019,18 +1325,21 @@ studio.internal = (function(proto) {
       node.update(systemNode,protoNode.info);
       parseNodes(node, protoNode);
       systemNode.forEachChild(function(childNode) {
-        if (childNode.info().is_local) {
+        if (childNode.info().is_local ?? childNode.info().isLocal) {
           appName = childNode.name();
           appId = childNode.id();
         }
+        // Request structure for each child node to load their children
+        appConnection.makeStructureRequest(childNode.id());
       });
     }
 
     function parseStructureResponse(protoResponse) {
       for (var i = 0; i < protoResponse.length; i++) {
         var protoNode = protoResponse[i];
-        var node = nodeMap.get(protoNode.info.node_id);
-        if (protoNode.info.node_id != proto.SYSTEM_NODE_ID) {
+        var node = nodeMap.get(protoNode.info.nodeId);
+
+        if (protoNode.info.nodeId != proto.SYSTEM_NODE_ID) {
           parseNodes(node, protoNode);
         } else {
           parseSystemNode(node, protoNode);
@@ -1042,7 +1351,7 @@ studio.internal = (function(proto) {
     function parseGetterResponse(protoResponse) {
       for (var i = 0; i < protoResponse.length; i++) {
         var variantValue = protoResponse[i];
-        var node = nodeMap.get(variantValue.node_id);
+        var node = nodeMap.get(variantValue.nodeId);
         if (node)
           node.receiveValue(proto.valueFromVariant(variantValue, node.info().value_type), variantValue.timestamp);
       }
@@ -1060,8 +1369,8 @@ studio.internal = (function(proto) {
     function parseEventResponse(protoResponse) {
       for (var i = 0; i < protoResponse.length; i++) {
         var variantValue = protoResponse[i];
-        for (var j = 0; j < variantValue.node_id.length; j++) {
-          var node = nodeMap.get(variantValue.node_id[j]);
+        for (var j = 0; j < variantValue.nodeId.length; j++) {
+          var node = nodeMap.get(variantValue.nodeId[j]);
           if (node){
             var event = {
               id: variantValue.id,
@@ -1090,8 +1399,8 @@ studio.internal = (function(proto) {
 
     function parseReauthResponse(protoResponse, metadata) {
       reauthRequestPending = false;
-      if (protoResponse.result_code != proto.AuthResultCode.eGranted && protoResponse.result_code != proto.AuthResultCode.eGrantedPasswordWillExpireSoon) {
-        var userAuthResult = new studio.api.UserAuthResult(protoResponse.result_code, protoResponse.result_text, protoResponse.additional_challenge_response_required);
+      if (protoResponse.resultCode != proto.AuthResultCode.eGranted && protoResponse.resultCode != proto.AuthResultCode.eGrantedPasswordWillExpireSoon) {
+        var userAuthResult = new studio.api.UserAuthResult(protoResponse.resultCode, protoResponse.resultText, protoResponse.additionalChallengeResponseRequired);
         reauthenticate(userAuthResult, metadata);
       }
     }
@@ -1107,27 +1416,48 @@ studio.internal = (function(proto) {
           + ' and text: "' + protoResponse.text + '"');
     }
 
+    function parseServicesNotification(protoNotification, metadata) {
+      if (protoNotification && protoNotification.services) {
+        appConnection.onServicesReceived(protoNotification.services, metadata);
+      }
+    }
+
+    function parseServiceMessage(protoMessages, metadata) {
+      if (protoMessages && protoMessages.length > 0) {
+        for (var i = 0; i < protoMessages.length; i++) {
+          appConnection.onServiceMessage(protoMessages[i], metadata);
+        }
+      }
+    }
+
     function handleIncomingContainer(protoContainer, metadata) {
-      switch(protoContainer.message_type){
+      switch(protoContainer.messageType){
         case proto.ContainerType.eStructureResponse:
-          parseStructureResponse(protoContainer.structure_response);
+          parseStructureResponse(protoContainer.structureResponse);
           break;
         case proto.ContainerType.eGetterResponse:
-          parseGetterResponse(protoContainer.getter_response);
+          parseGetterResponse(protoContainer.getterResponse);
           break;
         case proto.ContainerType.eStructureChangeResponse:
-          parseStructureChangeResponse(protoContainer.structure_change_response);
+          parseStructureChangeResponse(protoContainer.structureChangeResponse);
           break;
         case proto.ContainerType.eEventResponse:
-          parseEventResponse(protoContainer.event_response);
+          parseEventResponse(protoContainer.eventResponse);
           break;
         case proto.ContainerType.eCurrentTimeResponse:
           break;
         case proto.ContainerType.eReauthResponse:
-          parseReauthResponse(protoContainer.re_auth_response, metadata);
+          parseReauthResponse(protoContainer.reAuthResponse, metadata);
           break;
         case proto.ContainerType.eRemoteError:
           parseErrorResponse(protoContainer.error, metadata);
+          break;
+        case proto.ContainerType.eServicesNotification:
+          parseServicesNotification(protoContainer.servicesNotification, metadata);
+          break;
+        case proto.ContainerType.eServiceMessage:
+          parseServiceMessage(protoContainer.serviceMessage, metadata);
+          break;
         default:
           //TODO: Indicate error to Client
       }
@@ -1481,7 +1811,7 @@ studio.api = (function(internal) {
               function() {
                 delete nodes[path];
                 delete memoize[path];
-                return new Promise(function(resolve, reject) { reject("Child not found: " + path); });
+                return new Promise(function(resolve, reject) { reject("Child not found: " + path.join(".")); });
               });
       }
       return f;
