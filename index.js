@@ -72,69 +72,70 @@ var studio = (function() {
  * @namespace
  */
 studio.protocol = (function(ProtoBuf) {
-  var obj = {},
-        studioBuilder = ProtoBuf.loadProto(globalThis.p || p);
-  obj.Hello = studioBuilder.build("Hello");
-  obj.AuthRequest = studioBuilder.build("AuthRequest");
-  obj.AuthRequestChallengeResponse = studioBuilder.build("AuthRequest.ChallengeResponse");
-  obj.AdditionalChallengeResponseRequired = studioBuilder.build("AdditionalChallengeResponseRequired");
-  obj.AuthResponse = studioBuilder.build("AuthResponse");
-  obj.AuthResultCode = studioBuilder.build("AuthResponse.AuthResultCode");
-  obj.Container = studioBuilder.build("Container");
-  obj.ContainerType = studioBuilder.build("Container.Type");
-  obj.Error = studioBuilder.build("Error");
-  obj.RemoteErrorCode = studioBuilder.build("RemoteErrorCode");
-  obj.CDPNodeType = studioBuilder.build("CDPNodeType");
-  obj.CDPValueType = studioBuilder.build("CDPValueType");
-  obj.Info = studioBuilder.build("Info");
-  obj.InfoFlags = studioBuilder.build("Info.Flags");
-  obj.Node = studioBuilder.build("Node");
-  obj.VariantValue = studioBuilder.build("VariantValue");
-  obj.ValueRequest = studioBuilder.build("ValueRequest");
-  obj.EventRequest = studioBuilder.build("EventRequest");
-  obj.EventInfo = studioBuilder.build("EventInfo");
-  obj.EventCode = studioBuilder.build("EventInfo.CodeFlags");
-  obj.EventStatus = studioBuilder.build("EventInfo.StatusFlags");
-  obj.ChildAdd = studioBuilder.build("ChildAdd");
-  obj.ChildRemove = studioBuilder.build("ChildRemove");
+  var obj = {};
+  var root = ProtoBuf.parse(globalThis.p || p).root;
+
+  obj.Hello = root.lookupType("Hello");
+  obj.AuthRequest = root.lookupType("AuthRequest");
+  obj.AuthRequestChallengeResponse = root.lookupType("AuthRequest.ChallengeResponse");
+  obj.AdditionalChallengeResponseRequired = root.lookupType("AdditionalChallengeResponseRequired");
+  obj.AuthResponse = root.lookupType("AuthResponse");
+  obj.AuthResultCode = root.lookupEnum("AuthResponse.AuthResultCode").values;
+  obj.Container = root.lookupType("Container");
+  obj.ContainerType = root.lookupEnum("Container.Type").values;
+  obj.Error = root.lookupType("Error");
+  obj.RemoteErrorCode = root.lookupEnum("RemoteErrorCode").values;
+  obj.CDPNodeType = root.lookupEnum("CDPNodeType").values;
+  obj.CDPValueType = root.lookupEnum("CDPValueType").values;
+  obj.Info = root.lookupType("Info");
+  obj.InfoFlags = root.lookupEnum("Info.Flags").values;
+  obj.Node = root.lookupType("Node");
+  obj.VariantValue = root.lookupType("VariantValue");
+  obj.ValueRequest = root.lookupType("ValueRequest");
+  obj.EventRequest = root.lookupType("EventRequest");
+  obj.EventInfo = root.lookupType("EventInfo");
+  obj.EventCode = root.lookupEnum("EventInfo.CodeFlags").values;
+  obj.EventStatus = root.lookupEnum("EventInfo.StatusFlags").values;
+  obj.ChildAdd = root.lookupType("ChildAdd");
+  obj.ChildRemove = root.lookupType("ChildRemove");
 
   obj.valueToVariant = function (variantValue, type, value) {
     switch (type) {
       case obj.CDPValueType.eDOUBLE:
-        variantValue.d_value = value;
+        variantValue.dValue = value;
         break;
       case obj.CDPValueType.eFLOAT:
-        variantValue.f_value = value;
+        variantValue.fValue = value;
         break;
       case obj.CDPValueType.eUINT64:
-        variantValue.ui64_value = value;
+        variantValue.ui64Value = value;
         break;
       case obj.CDPValueType.eINT64:
-        variantValue.i64_value = value;
+        variantValue.i64Value = value;
         break;
       case obj.CDPValueType.eUINT:
-        variantValue.ui_value = value;
+        variantValue.uiValue = value;
         break;
       case obj.CDPValueType.eINT:
-        variantValue.i_value = value;
+        variantValue.iValue = value;
         break;
       case obj.CDPValueType.eUSHORT:
-        variantValue.us_value = value;
+        variantValue.usValue = value;
         break;
       case obj.CDPValueType.eSHORT:
-        variantValue.s_value = value;
+        variantValue.sValue = value;
         break;
       case obj.CDPValueType.eUCHAR:
-        variantValue.uc_value = value;
+        variantValue.ucValue = value;
         break;
       case obj.CDPValueType.eCHAR:
-        variantValue.c_value = value;
+        variantValue.cValue = value;
         break;
       case obj.CDPValueType.eBOOL:
-        variantValue.b_value = value;
+        variantValue.bValue = value;
         break;
       case obj.CDPValueType.eSTRING:
-        variantValue.str_value = value;
+        variantValue.strValue = value;
         break;
     }
   };
@@ -142,29 +143,29 @@ studio.protocol = (function(ProtoBuf) {
   obj.valueFromVariant = function(variantValue, type) {
   switch(type) {
     case obj.CDPValueType.eDOUBLE:
-      return variantValue.d_value;
+      return variantValue.dValue;
     case obj.CDPValueType.eFLOAT:
-      return variantValue.f_value;
+      return variantValue.fValue;
     case obj.CDPValueType.eUINT64:
-      return variantValue.ui64_value;
+      return variantValue.ui64Value;
     case obj.CDPValueType.eINT64:
-      return variantValue.i64_value;
+      return variantValue.i64Value;
     case obj.CDPValueType.eUINT:
-      return variantValue.ui_value;
+      return variantValue.uiValue;
     case obj.CDPValueType.eINT:
-      return variantValue.i_value;
+      return variantValue.iValue;
     case obj.CDPValueType.eUSHORT:
-      return variantValue.us_value;
+      return variantValue.usValue;
     case obj.CDPValueType.eSHORT:
-      return variantValue.s_value;
+      return variantValue.sValue;
     case obj.CDPValueType.eUCHAR:
-      return variantValue.uc_value;
+      return variantValue.ucValue;
     case obj.CDPValueType.eCHAR:
-      return variantValue.c_value;
+      return variantValue.cValue;
     case obj.CDPValueType.eBOOL:
-      return variantValue.b_value;
+      return variantValue.bValue;
     case obj.CDPValueType.eSTRING:
-      return variantValue.str_value;
+      return variantValue.strValue;
     default:
       return 0;
   }
@@ -179,23 +180,23 @@ studio.protocol = (function(ProtoBuf) {
 
   obj.CreateAuthRequest = function (dict, challenge) {
     return new Promise(function(resolve, reject) {
-      var authReq = new obj.AuthRequest();
+      var authReq = obj.AuthRequest.create();
       var username = dict.Username || '';
       var password = dict.Password || '';
       var credentials = new TextEncoder().encode(username.toLowerCase() + ':' + password); // encode to utf-8 byte array
-      authReq.user_id = username.toLowerCase();
+      authReq.userId = username.toLowerCase();
       crypto.subtle.digest('SHA-256', credentials.buffer)
         .then(function(digest) {
-          var colon = new Int8Array([':'.charCodeAt(0)]);
-          var buffer = obj.appendBuffer(obj.appendBuffer(challenge.buffer.slice(challenge.offset, challenge.limit), colon.buffer), digest);
+          var colon = new Uint8Array([':'.charCodeAt(0)]);
+          var buffer = obj.appendBuffer(obj.appendBuffer(challenge, colon), digest);
           return crypto.subtle.digest('SHA-256', buffer)
         })
         .then(function(challenge_digest) {
-          var response = new obj.AuthRequestChallengeResponse();
+          var response = obj.AuthRequestChallengeResponse.create();
           response.type = "PasswordHash";
           response.response = new Uint8Array(challenge_digest);
-          authReq.challenge_response = [];
-          authReq.challenge_response.push(response);
+          authReq.challengeResponse = [];
+          authReq.challengeResponse.push(response);
           resolve(authReq);
         })
         .catch(function(err){
@@ -221,7 +222,7 @@ studio.protocol = (function(ProtoBuf) {
       return new Promise(function(resolve, reject) {
 
         try {
-          var container = obj.Container.decode(message);
+          var container = obj.Container.decode(new Uint8Array(message));
         } catch (err) {
           console.log("Container Error: "+err+"\n");
           onError();
@@ -245,7 +246,7 @@ studio.protocol = (function(ProtoBuf) {
           return obj.CreateAuthRequest(dict, metadata.challenge);
         })
         .then(function(request){
-          socket.send(request.toArrayBuffer());
+          socket.send(obj.AuthRequest.encode(request).finish());
         })
         .catch(function(err){
           console.log("Authentication cancelled.", err)
@@ -256,22 +257,22 @@ studio.protocol = (function(ProtoBuf) {
       return new Promise(function(resolve, reject) {
 
         try {
-          var authResponse = obj.AuthResponse.decode(message);
+          var authResponse = obj.AuthResponse.decode(new Uint8Array(message));
         } catch (err) {
           console.log("AuthResponse Error: "+err+"\n");
           onError();
           resolve(new ErrorHandler());
         }
 
-        if (authResponse.result_code == obj.AuthResultCode.eGranted)
+        if (authResponse.resultCode == obj.AuthResultCode.eGranted)
         {
-          var container = new obj.Container();
-          container.message_type = obj.ContainerType.eStructureRequest;
-          socket.send(container.toArrayBuffer());
+          var container = obj.Container.create();
+          container.messageType = obj.ContainerType.eStructureRequest;
+          socket.send(obj.Container.encode(container).finish());
           resolve(new ContainerHandler(onContainer, onError, metadata));
         } else {
-          console.log("Unable to login with existing user, password.", authResponse.result_text);
-          var userAuthResult = new studio.api.UserAuthResult(authResponse.result_code, authResponse.result_text);
+          console.log("Unable to login with existing user, password.", authResponse.resultText);
+          var userAuthResult = new studio.api.UserAuthResult(authResponse.resultCode, authResponse.resultText);
           this.sendAuthRequest(userAuthResult);
           resolve(this);
         }
@@ -285,7 +286,7 @@ studio.protocol = (function(ProtoBuf) {
     this.handle = function(message){
       return new Promise(function(resolve, reject) {
         try {
-          var hello = obj.Hello.decode(message);
+          var hello = obj.Hello.decode(new Uint8Array(message));
         } catch (err) {
           console.log("Hello Error: "+err+"\n");
           onError();
@@ -302,10 +303,10 @@ studio.protocol = (function(ProtoBuf) {
         }
 
         var metadata = {}
-        metadata.systemName = hello.system_name;
-        metadata.applicationName = hello.application_name;
-        metadata.cdpVersion = hello.cdp_version_major + '.' + hello.cdp_version_minor + '.' + hello.cdp_version_patch;
-        metadata.systemUseNotification = hello.system_use_notification;
+        metadata.systemName = hello.systemName;
+        metadata.applicationName = hello.applicationName;
+        metadata.cdpVersion = hello.cdpVersionMajor + '.' + hello.cdpVersionMinor + '.' + hello.cdpVersionPatch;
+        metadata.systemUseNotification = hello.systemUseNotification;
         metadata.challenge = hello.challenge;
 
         var request = new studio.api.Request(metadata.systemName, metadata.applicationName, metadata.cdpVersion, metadata.systemUseNotification, null);
@@ -318,7 +319,7 @@ studio.protocol = (function(ProtoBuf) {
 
         applicationAccepted(request)
           .then(function(){
-            if (hello.challenge) {
+            if (hello.challenge && hello.challenge.length) {
               if (!notificationListener || !notificationListener.credentialsRequested)
               {
                 console.log("No notificationListener.credentialsRequested callback provided to studio.api.Client constructor. Can't authenticate connection!");
@@ -332,9 +333,9 @@ studio.protocol = (function(ProtoBuf) {
               resolve(authHandler);
             }
             else {
-              var container = new obj.Container();
-              container.message_type = obj.ContainerType.eStructureRequest;
-              socket.send(container.toArrayBuffer());
+              var container = obj.Container.create();
+              container.messageType = obj.ContainerType.eStructureRequest;
+              socket.send(obj.Container.encode(container).finish());
               resolve(new ContainerHandler(onContainer, onError, metadata));
             }
           })
@@ -454,7 +455,7 @@ studio.internal = (function(proto) {
     this.update = function(nodeParent, protoInfo) {
       parent = nodeParent;
       lastInfo = protoInfo;
-      id = protoInfo.node_id;
+      id = protoInfo.nodeId;
       this.async._makeGetterRequest();
       for (var i = 0; i < eventSubscriptions.length; i++)
         app.makeEventRequest(id, eventSubscriptions[i][1], false);
@@ -583,7 +584,7 @@ studio.internal = (function(proto) {
 
     this.async.sendValue = function(value, timestamp) {
       lastValue = value;
-      app.makeSetterRequest(id, lastInfo.value_type, value, timestamp);
+      app.makeSetterRequest(id, lastInfo.valueType, value, timestamp);
       //when offline must queue or update pending set request and call set callbacks ...???
     };
 
@@ -634,9 +635,9 @@ studio.internal = (function(proto) {
       this.onAppConnect(studioURL, notificationListener, autoConnect).then(function(system){
         var promises = [];
         system.forEachChild(function (app) {
-          if (!app.info().is_local)
+          if (!app.info().isLocal)
           {
-            var appUrl = app.info().server_addr + ":" + app.info().server_port;
+            var appUrl = app.info().serverAddr + ":" + app.info().serverPort;
             promises.push(this_.onAppConnect(appUrl, notificationListener, autoConnect));
           }
         });
@@ -655,7 +656,7 @@ studio.internal = (function(proto) {
       var nodes = [];
       appConnections.forEach(function(con) {
         con.root().forEachChild(function(app) {
-          if (app.info().is_local)
+          if (app.info().isLocal)
             nodes.push(app);
         });
       });
@@ -875,9 +876,9 @@ studio.internal = (function(proto) {
 
     function send(message) {
       if (socket.readyState == WebSocket.OPEN) {
-        socket.send(message.toArrayBuffer());
+        socket.send(message);
       } else {
-        requests.push(message.toArrayBuffer());
+        requests.push(message);
       }
     }
 
@@ -889,105 +890,104 @@ studio.internal = (function(proto) {
     }
 
     this.makeStructureRequest = function(id) {
-      var msg = new proto.Container();
-      msg.message_type = proto.ContainerType.eStructureRequest;
+      var msg = proto.Container.create();
+      msg.messageType = proto.ContainerType.eStructureRequest;
       if (id != proto.SYSTEM_NODE_ID) {
-        msg.structure_request = [];
-        msg.structure_request.push(id);
+        msg.structureRequest = [id];
       }
-      send(msg);
+      send(proto.Container.encode(msg).finish());
     };
 
     this.makeGetterRequest = function(id, fs, sampleRate, stop) {
-      var msg = new proto.Container();
-      var request = new proto.ValueRequest();
-      request.node_id = id;
+      var msg = proto.Container.create();
+      var request = proto.ValueRequest.create();
+      request.nodeId = id;
       request.fs = fs;
       if (sampleRate) {
-        request.sample_rate = sampleRate;
+        request.sampleRate = sampleRate;
       }
       if (stop) {
         request.stop = stop;
       }
-      msg.message_type = proto.ContainerType.eGetterRequest;
-      msg.getter_request = [request];
-      send(msg);
+      msg.messageType = proto.ContainerType.eGetterRequest;
+      msg.getterRequest = [request];
+      send(proto.Container.encode(msg).finish());
     };
 
     this.makeEventRequest = function(id, startingFrom, stop) {
-      var msg = new proto.Container();
-      var request = new proto.EventRequest();
-      request.node_id = id;
+      var msg = proto.Container.create();
+      var request = proto.EventRequest.create();
+      request.nodeId = id;
       if (stop) {
         request.stop = stop;
       }
       if (startingFrom != undefined) {
-        request.starting_from = startingFrom;
+        request.startingFrom = startingFrom;
       }
-      msg.message_type = proto.ContainerType.eEventRequest;
-      msg.event_request = [request];
-      send(msg);
+      msg.messageType = proto.ContainerType.eEventRequest;
+      msg.eventRequest = [request];
+      send(proto.Container.encode(msg).finish());
     };
 
     this.makeChildAddRequest = function(id, name, modelName){
-      var msg = new proto.Container();
-      var request = new proto.ChildAdd();
-      request.parent_node_id = id;
-      request.child_name = name;
-      request.child_type_name = modelName;
-      msg.message_type = proto.ContainerType.eChildAddRequest;
-      msg.child_add_request = [request];
-      send(msg);
+      var msg = proto.Container.create();
+      var request = proto.ChildAdd.create();
+      request.parentNodeId = id;
+      request.childName = name;
+      request.childTypeName = modelName;
+      msg.messageType = proto.ContainerType.eChildAddRequest;
+      msg.childAddRequest = [request];
+      send(proto.Container.encode(msg).finish());
     }
 
     this.makeChildRemoveRequest = function(id, name){
-      var msg = new proto.Container();
-      var request = new proto.ChildRemove();
-      request.parent_node_id = id;
-      request.child_name = name;
-      msg.message_type = proto.ContainerType.eChildRemoveRequest;
-      msg.child_remove_request = [request];
-      send(msg);
+      var msg = proto.Container.create();
+      var request = proto.ChildRemove.create();
+      request.parentNodeId = id;
+      request.childName = name;
+      msg.messageType = proto.ContainerType.eChildRemoveRequest;
+      msg.childRemoveRequest = [request];
+      send(proto.Container.encode(msg).finish());
     }
 
     this.makeSetterRequest = function(id, type, value, timestamp) {
-      var msg = new proto.Container();
-      var request = new proto.VariantValue();
-      request.node_id = id;
+      var msg = proto.Container.create();
+      var request = proto.VariantValue.create();
+      request.nodeId = id;
       if (timestamp) {
         request.timestamp = timestamp;
       }
       proto.valueToVariant(request, type, value);
-      msg.message_type = proto.ContainerType.eSetterRequest;
-      msg.setter_request = [request];
-      send(msg);
+      msg.messageType = proto.ContainerType.eSetterRequest;
+      msg.setterRequest = [request];
+      send(proto.Container.encode(msg).finish());
     };
 
     function makeReauthRequest(dict, challenge) {
       proto.CreateAuthRequest(dict, challenge)
         .then(function(request){
-          var msg = new proto.Container();
-          msg.message_type = proto.ContainerType.eReauthRequest;
-          msg.re_auth_request = request;
-          send(msg);
+          var msg = proto.Container.create();
+          msg.messageType = proto.ContainerType.eReauthRequest;
+          msg.reAuthRequest = request;
+          send(proto.Container.encode(msg).finish());
           reauthRequestPending = true;
         })
     };
 
     function addChildNode(parentNode, protoNode) {
-      var newNode = new AppNode(appConnection, protoNode.info.node_id);
+      var newNode = new AppNode(appConnection, protoNode.info.nodeId);
       newNode.update(parentNode, protoNode.info);
-      nodeMap.set(protoNode.info.node_id, newNode);
+      nodeMap.set(protoNode.info.nodeId, newNode);
       parentNode.add(newNode);
     }
 
     function parseChildNode(parentNode, protoNode) {
       var node = parentNode.child(protoNode.info.name);
       if (node) {
-        if (node.id() != protoNode.info.node_id) {
+        if (node.id() != protoNode.info.nodeId) {
           //node id has changed after reconnect
           nodeMap.delete(node.id());
-          nodeMap.set(protoNode.info.node_id, node);
+          nodeMap.set(protoNode.info.nodeId, node);
         }
         node.update(parentNode, protoNode.info);
       } else {
@@ -1019,7 +1019,7 @@ studio.internal = (function(proto) {
       node.update(systemNode,protoNode.info);
       parseNodes(node, protoNode);
       systemNode.forEachChild(function(childNode) {
-        if (childNode.info().is_local) {
+        if (childNode.info().isLocal) {
           appName = childNode.name();
           appId = childNode.id();
         }
@@ -1029,8 +1029,8 @@ studio.internal = (function(proto) {
     function parseStructureResponse(protoResponse) {
       for (var i = 0; i < protoResponse.length; i++) {
         var protoNode = protoResponse[i];
-        var node = nodeMap.get(protoNode.info.node_id);
-        if (protoNode.info.node_id != proto.SYSTEM_NODE_ID) {
+        var node = nodeMap.get(protoNode.info.nodeId);
+        if (protoNode.info.nodeId != proto.SYSTEM_NODE_ID) {
           parseNodes(node, protoNode);
         } else {
           parseSystemNode(node, protoNode);
@@ -1042,9 +1042,9 @@ studio.internal = (function(proto) {
     function parseGetterResponse(protoResponse) {
       for (var i = 0; i < protoResponse.length; i++) {
         var variantValue = protoResponse[i];
-        var node = nodeMap.get(variantValue.node_id);
+        var node = nodeMap.get(variantValue.nodeId);
         if (node)
-          node.receiveValue(proto.valueFromVariant(variantValue, node.info().value_type), variantValue.timestamp);
+          node.receiveValue(proto.valueFromVariant(variantValue, node.info().valueType), variantValue.timestamp);
       }
     }
 
@@ -1060,8 +1060,8 @@ studio.internal = (function(proto) {
     function parseEventResponse(protoResponse) {
       for (var i = 0; i < protoResponse.length; i++) {
         var variantValue = protoResponse[i];
-        for (var j = 0; j < variantValue.node_id.length; j++) {
-          var node = nodeMap.get(variantValue.node_id[j]);
+        for (var j = 0; j < variantValue.nodeId.length; j++) {
+          var node = nodeMap.get(variantValue.nodeId[j]);
           if (node){
             var event = {
               id: variantValue.id,
@@ -1090,8 +1090,8 @@ studio.internal = (function(proto) {
 
     function parseReauthResponse(protoResponse, metadata) {
       reauthRequestPending = false;
-      if (protoResponse.result_code != proto.AuthResultCode.eGranted && protoResponse.result_code != proto.AuthResultCode.eGrantedPasswordWillExpireSoon) {
-        var userAuthResult = new studio.api.UserAuthResult(protoResponse.result_code, protoResponse.result_text, protoResponse.additional_challenge_response_required);
+      if (protoResponse.resultCode != proto.AuthResultCode.eGranted && protoResponse.resultCode != proto.AuthResultCode.eGrantedPasswordWillExpireSoon) {
+        var userAuthResult = new studio.api.UserAuthResult(protoResponse.resultCode, protoResponse.resultText, protoResponse.additionalChallengeResponseRequired);
         reauthenticate(userAuthResult, metadata);
       }
     }
@@ -1108,23 +1108,23 @@ studio.internal = (function(proto) {
     }
 
     function handleIncomingContainer(protoContainer, metadata) {
-      switch(protoContainer.message_type){
+      switch(protoContainer.messageType){
         case proto.ContainerType.eStructureResponse:
-          parseStructureResponse(protoContainer.structure_response);
+          parseStructureResponse(protoContainer.structureResponse);
           break;
         case proto.ContainerType.eGetterResponse:
-          parseGetterResponse(protoContainer.getter_response);
+          parseGetterResponse(protoContainer.getterResponse);
           break;
         case proto.ContainerType.eStructureChangeResponse:
-          parseStructureChangeResponse(protoContainer.structure_change_response);
+          parseStructureChangeResponse(protoContainer.structureChangeResponse);
           break;
         case proto.ContainerType.eEventResponse:
-          parseEventResponse(protoContainer.event_response);
+          parseEventResponse(protoContainer.eventResponse);
           break;
         case proto.ContainerType.eCurrentTimeResponse:
           break;
         case proto.ContainerType.eReauthResponse:
-          parseReauthResponse(protoContainer.re_auth_response, metadata);
+          parseReauthResponse(protoContainer.reAuthResponse, metadata);
           break;
         case proto.ContainerType.eRemoteError:
           parseErrorResponse(protoContainer.error, metadata);
