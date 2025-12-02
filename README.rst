@@ -12,6 +12,55 @@ Installation
 
     $ npm install cdp-client
 
+Example
+-------
+
+    .. code:: javascript
+
+        const studio = require("cdp-client");
+
+        const client = new studio.api.Client("127.0.0.1:7690", {
+          credentialsRequested: async (request) => {
+            return { Username: "cdpuser", Password: "cdpuser" };
+          }
+        });
+
+        function subscribeToApp(appName) {
+          client.find(appName + '.CPULoad').then(node => {
+            node.subscribeToValues(value => {
+              console.log(`[${appName}] CPULoad: ${value}`);
+            });
+          }).catch(() => {}); // Not all apps have CPULoad
+        }
+
+        client.root().then(root => {
+          root.forEachChild(app => subscribeToApp(app.name()));
+          root.subscribeToStructure((name, change) => {
+            if (change === studio.api.structure.ADD)
+              subscribeToApp(name);
+          });
+        }).catch(err => console.error("Connection failed:", err));
+
+Proxy Support (CDP 5.1+)
+------------------------
+
+CDP 5.1 introduced proxy support which allows a single WebSocket connection to access
+multiple backend CDP applications through multiplexing. In older CDP versions, the client
+connected directly to each CDP application, meaning a dedicated port had to be opened for
+each application.
+
+When connecting to a CDP 5.1+ application configured as a proxy, the client automatically
+discovers and connects to all backend applications. All discovered applications appear as
+children of the root system node, enabling transparent access to their structure and values
+through the standard API. The example above works the same whether the server has proxy
+support or not.
+
+Benefits
+~~~~~~~~
+
+- Simplified firewall configuration - only one port needs to be opened
+- SSH port forwarding - forward a single port to access entire CDP system
+
 API
 ---
 
@@ -303,6 +352,20 @@ client.find(path)
           // use the load object referring to CPULoad in MyApp
         });
 
+client.close()
+^^^^^^^^^^^^^^
+
+- Usage
+
+    Close all connections managed by this client. This stops reconnection attempts
+    and cleans up all resources. Call this when you are done using the client.
+
+- Example
+
+    .. code:: javascript
+
+        client.close();
+
 Instance Methods / INode
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -334,11 +397,11 @@ node.info()
     +------------------+------------------------------+---------------------------------------------------------------+
     | Property         | Type                         | Description                                                   |
     +==================+==============================+===============================================================+
-    | Info.node_id     | number                       | Application wide unique ID for each instance in CDP structure |
+    | Info.nodeId      | number                       | Application wide unique ID for each instance in CDP structure |
     +------------------+------------------------------+---------------------------------------------------------------+
     | Info.name        | string                       | Nodes short name                                              |
     +------------------+------------------------------+---------------------------------------------------------------+
-    | Info.node_type   | studio.protocol.CDPNodeType  | | Direct CDP base type of the class. One of the following:    |
+    | Info.nodeType    | studio.protocol.CDPNodeType  | | Direct CDP base type of the class. One of the following:    |
     |                  |                              | - CDP_UNDEFINED                                               |
     |                  |                              | - CDP_APPLICATION                                             |
     |                  |                              | - CDP_COMPONENT                                               |
@@ -351,7 +414,7 @@ node.info()
     |                  |                              | - CDP_OPERATOR                                                |
     |                  |                              | - CDP_NODE                                                    |
     +------------------+------------------------------+---------------------------------------------------------------+
-    | Info.value_type  | studio.protocol.CDPValueType | | Optional: Value primitive type the node holds               |
+    | Info.valueType   | studio.protocol.CDPValueType | | Optional: Value primitive type the node holds               |
     |                  |                              | | if node may hold a value. One of the following:             |
     |                  |                              | - eUNDEFINED                                                  |
     |                  |                              | - eDOUBLE                                                     |
@@ -367,15 +430,15 @@ node.info()
     |                  |                              | - eBOOL                                                       |
     |                  |                              | - eSTRING                                                     |
     +------------------+------------------------------+---------------------------------------------------------------+
-    | Info.type_name   | string                       | Optional: Class name of the reflected node                    |
+    | Info.typeName    | string                       | Optional: Class name of the reflected node                    |
     +------------------+------------------------------+---------------------------------------------------------------+
-    | Info.server_addr | string                       | Optional: StudioAPI IP present on application nodes that      |
-    |                  |                              | have **Info.is_local == false**                               |
+    | Info.serverAddr  | string                       | Optional: StudioAPI IP present on application nodes that      |
+    |                  |                              | have **Info.isLocal == false**                                |
     +------------------+------------------------------+---------------------------------------------------------------+
-    | Info.server_port | number                       | Optional: StudioAPI Port present on application nodes that    |
-    |                  |                              | have **Info.is_local == false**                               |
+    | Info.serverPort  | number                       | Optional: StudioAPI Port present on application nodes that    |
+    |                  |                              | have **Info.isLocal == false**                                |
     +------------------+------------------------------+---------------------------------------------------------------+
-    | Info.is_local    | boolean                      | Optional: When multiple applications are present in root node |
+    | Info.isLocal     | boolean                      | Optional: When multiple applications are present in root node |
     |                  |                              | this flag is set to true for the application that the client  |
     |                  |                              | is connected to                                               |
     +------------------+------------------------------+---------------------------------------------------------------+
@@ -435,7 +498,7 @@ node.forEachChild(iteratorCallback)
     .. code:: javascript
 
         cdpapp.forEachChild(function (child) {
-          if (child.info().node_type == studio.protocol.CDPNodeType.CDP_COMPONENT) {
+          if (child.info().nodeType == studio.protocol.CDPNodeType.CDP_COMPONENT) {
             // Use child object of type {INode} that is a CDP component.
           }
         });
@@ -477,7 +540,7 @@ node.subscribeToValues(valueConsumer, fs, sampleRate)
 - Usage
 
     Subscribe to value changes on this node. On each value change valueConsumer function is called
-    with value of the nodes value_type and UTC Unix timestamp in nanoseconds (nanoseconds from 01.01.1970).
+    with value of the nodes valueType and UTC Unix timestamp in nanoseconds (nanoseconds from 01.01.1970).
     Timestamp refers to the time of value change in connected application on target controller.
 
 - Example
@@ -579,7 +642,7 @@ node.subscribeToEvents(eventConsumer, timestampFrom)
     +-------------------+-----------------------------+---------------------------------------------------------------------------------------------------------------------------+
     | Event.code        | studio.protocol.EventCode   | Optional: Event code flags. Any of:                                                                                       |
     |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
-    |                   |                             | - eAlarmSet                 | The alarm's Set flag/state was set. The alarm changed state to "Unack-Set"                  |
+    |                   |                             | - aAlarmSet                 | The alarm's Set flag/state was set. The alarm changed state to "Unack-Set"                  |
     |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
     |                   |                             | - eAlarmClr                 | The alarm's Set flag was cleared. The Unack state is unchanged.                             |
     |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
@@ -591,7 +654,7 @@ node.subscribeToEvents(eventConsumer, timestampFrom)
     |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
     |                   |                             | - eNodeBoot                 | The provider reports that the CDPEventNode just have booted.                                |
     +-------------------+-----------------------------+-----------------------------+---------------------------------------------------------------------------------------------+
-    | Event.status      | studio.protocol.EventStatus | Optional: Value primitive type the node holds if node may hold a value. Any of:                                           |
+    | Event.status      | studio.protocol.EventStatus | Optional: Status flags as a numeric bitfield. Possible flag values:                                           |
     |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
     |                   |                             | - eStatusOK                 | No alarm set                                                                                |
     |                   |                             +-----------------------------+---------------------------------------------------------------------------------------------+
