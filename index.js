@@ -48,7 +48,7 @@ var protobuf; // resolved at runtime – see initEnvironment()
   } else {
     // ─────────────────────────────── Browser ───────────────────────────────
     if (typeof window !== 'undefined') {
-      protobuf = (window.dcodeIO && window.dcodeIO.ProtoBuf) ? window.dcodeIO.ProtoBuf : window.protobuf;
+      protobuf = window.protobuf;
     } else {
       throw new Error('[studioapi] Neither Node.js nor Browser environment detected properly');
     }
@@ -73,7 +73,7 @@ var studio = (function() {
  */
 studio.protocol = (function(ProtoBuf) {
   var obj = {};
-  var root = ProtoBuf.parse(globalThis.p || p).root;
+  var root = ProtoBuf.parse(globalThis.p).root;
 
   obj.Hello = root.lookupType("Hello");
   obj.AuthRequest = root.lookupType("AuthRequest");
@@ -95,9 +95,35 @@ studio.protocol = (function(ProtoBuf) {
   obj.EventRequest = root.lookupType("EventRequest");
   obj.EventInfo = root.lookupType("EventInfo");
   obj.EventCode = root.lookupEnum("EventInfo.CodeFlags").values;
-  obj.EventStatus = root.lookupEnum("EventInfo.StatusFlags").values;
+  obj.EventStatus = {
+    eStatusOK: 0x0,
+    eNotifySet: 0x1,
+    eWarningSet: 0x10,
+    eLowLevelSet: 0x20,
+    eHighLevelSet: 0x40,
+    eErrorSet: 0x100,
+    eLowLowLevelSet: 0x200,
+    eHighHighLevelSet: 0x400,
+    eEmergencySet: 0x800,
+    eValueForced: 0x1000,
+    eRepeatBlocked: 0x2000,
+    eProcessBlocked: 0x4000,
+    eOperatorBlocked: 0x8000,
+    eNotifyUnacked: 0x10000,
+    eWarningUnacked: 0x100000,
+    eErrorUnacked: 0x1000000,
+    eEmergencyUnacked: 0x8000000,
+    eDisabled: 0x20000000,
+    eSignalFault: 0x40000000,
+    eComponentSuspended: 0x80000000
+  };
   obj.ChildAdd = root.lookupType("ChildAdd");
   obj.ChildRemove = root.lookupType("ChildRemove");
+  obj.ServicesRequest = root.lookupType("ServicesRequest");
+  obj.ServicesNotification = root.lookupType("ServicesNotification");
+  obj.ServiceInfo = root.lookupType("ServiceInfo");
+  obj.ServiceMessage = root.lookupType("ServiceMessage");
+  obj.ServiceMessageKind = root.lookupEnum("ServiceMessage.Kind").values;
 
   obj.valueToVariant = function (variantValue, type, value) {
     switch (type) {
@@ -215,6 +241,28 @@ studio.protocol = (function(ProtoBuf) {
     }.bind(this);
   }
 
+  // Minimum compat version required for proxy protocol support
+  var PROXY_MIN_COMPAT_VERSION = 4;
+  obj.PROXY_MIN_COMPAT_VERSION = PROXY_MIN_COMPAT_VERSION;
+
+  // Create encoded ServicesRequest container bytes for proxy protocol
+  obj.createServicesRequestBytes = function() {
+    var servicesReq = obj.Container.create();
+    servicesReq.messageType = obj.ContainerType.eServicesRequest;
+    servicesReq.servicesRequest = obj.ServicesRequest.create({
+      subscribe: true,
+      inactivityResendInterval: 120
+    });
+    return obj.Container.encode(servicesReq).finish();
+  };
+
+  // Helper to send ServicesRequest for proxy protocol (compat >= 4)
+  function sendServicesRequest(socket, metadata) {
+    if (metadata.compatVersion >= PROXY_MIN_COMPAT_VERSION) {
+      socket.send(obj.createServicesRequestBytes());
+    }
+  }
+
   function ContainerHandler(onContainer, onError, metadata){
     this.name = "Container";
     this.metadata = metadata;
@@ -226,7 +274,7 @@ studio.protocol = (function(ProtoBuf) {
         } catch (err) {
           console.log("Container Error: "+err+"\n");
           onError();
-          resolve(new ErrorHandler());
+          return resolve(new ErrorHandler());
         }
         onContainer(container, metadata);
         resolve(this);
@@ -261,7 +309,7 @@ studio.protocol = (function(ProtoBuf) {
         } catch (err) {
           console.log("AuthResponse Error: "+err+"\n");
           onError();
-          resolve(new ErrorHandler());
+          return resolve(new ErrorHandler());
         }
 
         if (authResponse.resultCode == obj.AuthResultCode.eGranted)
@@ -269,6 +317,7 @@ studio.protocol = (function(ProtoBuf) {
           var container = obj.Container.create();
           container.messageType = obj.ContainerType.eStructureRequest;
           socket.send(obj.Container.encode(container).finish());
+          sendServicesRequest(socket, metadata);
           resolve(new ContainerHandler(onContainer, onError, metadata));
         } else {
           console.log("Unable to login with existing user, password.", authResponse.resultText);
@@ -290,15 +339,23 @@ studio.protocol = (function(ProtoBuf) {
         } catch (err) {
           console.log("Hello Error: "+err+"\n");
           onError();
-          resolve(new ErrorHandler());
+          return resolve(new ErrorHandler());
         }
 
         function applicationAcceptanceRequested(request){
           return new Promise(function(resolve, reject) {
-            if (request.systemUseNotification())
-              window.confirm(metadata.systemUseNotification) ? resolve() : reject();
-            else
+            if (request.systemUseNotification()) {
+              // In browser, use window.confirm; in Node.js, auto-accept
+              if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+                window.confirm(metadata.systemUseNotification) ? resolve() : reject();
+              } else {
+                // Node.js: auto-accept system use notification
+                console.log("System use notification: " + metadata.systemUseNotification);
+                resolve();
+              }
+            } else {
               resolve();
+            }
           });
         }
 
@@ -308,6 +365,7 @@ studio.protocol = (function(ProtoBuf) {
         metadata.cdpVersion = hello.cdpVersionMajor + '.' + hello.cdpVersionMinor + '.' + hello.cdpVersionPatch;
         metadata.systemUseNotification = hello.systemUseNotification;
         metadata.challenge = hello.challenge;
+        metadata.compatVersion = hello.compatVersion;
 
         var request = new studio.api.Request(metadata.systemName, metadata.applicationName, metadata.cdpVersion, metadata.systemUseNotification, null);
         var applicationAccepted = {}
@@ -336,13 +394,14 @@ studio.protocol = (function(ProtoBuf) {
               var container = obj.Container.create();
               container.messageType = obj.ContainerType.eStructureRequest;
               socket.send(obj.Container.encode(container).finish());
+              sendServicesRequest(socket, metadata);
               resolve(new ContainerHandler(onContainer, onError, metadata));
             }
           })
           .catch(function(){
             console.log("Application acceptance denied.")
             resolve(this);
-          });
+          }.bind(this));
       }.bind(this));
     };
   }
@@ -353,11 +412,27 @@ studio.protocol = (function(ProtoBuf) {
     var onContainer = function(container, metadata) {(this.onContainer && this.onContainer(container, metadata));}.bind(this);
     var onError = function(){(this.onError && this.onError());}.bind(this);
     var handler = new HelloHandler(socket, notificationListener, onContainer, onError);
+    var messageQueue = [];
+    var processing = false;
+
+    var processQueue = function() {
+      if (processing || messageQueue.length === 0) return;
+      processing = true;
+      var message = messageQueue.shift();
+      handler.handle(message).then(function(newHandler) {
+        handler = newHandler;
+        processing = false;
+        processQueue();
+      }).catch(function(err) {
+        console.error("Handler error:", err);
+        processing = false;
+        processQueue();
+      });
+    };
 
     this.handle = function(message){
-      handler.handle(message).then(function(newHandler){
-        handler = newHandler;
-      });
+      messageQueue.push(message);
+      processQueue();
     };
   };
 
@@ -383,6 +458,12 @@ studio.internal = (function(proto) {
     ADD: 1
   };
 
+  // Helper to remove first matching item from array (shared by AppNode and SystemNode)
+  function removeFirst(array, predicate) {
+    var idx = array.findIndex(predicate);
+    if (idx >= 0) array.splice(idx, 1);
+  }
+
   function AppNode(appConnection, nodeId) {
     var parent = undefined;
     var id = nodeId;
@@ -397,6 +478,7 @@ studio.internal = (function(proto) {
     var lastValue;
     var lastInfo = null; //when we get this, if there are any child requests we need to fetch child fetch too
     var valid = true;
+    var hasActiveValueSubscription = false; // track if we've sent a getter request to server
 
     this.path = function() {
       var path = "";
@@ -429,6 +511,14 @@ studio.internal = (function(proto) {
 
     this.invalidate = function() {
       valid = false;
+      givenPromises.forEach(function(promiseHandlers, apiNode) {
+        promiseHandlers.forEach(function(promiseHandler) {
+          try {
+            promiseHandler.reject(apiNode);
+          } catch (e) { /* ignore */ }
+        });
+      });
+      givenPromises.clear();
     };
 
     this.hasSubscriptions = function() {
@@ -450,6 +540,12 @@ studio.internal = (function(proto) {
         childIterators.push(iteratorFunction);
         app.makeStructureRequest(id);
       }
+    };
+
+    // Internal: iterate children immediately without structureFetched check
+    // Used during structure parsing to detect removed children
+    this.forEachChildImmediate = function(iteratorFunction) {
+      childMap.forEach(iteratorFunction);
     };
 
     this.update = function(nodeParent, protoInfo) {
@@ -482,20 +578,23 @@ studio.internal = (function(proto) {
 
     this.done = function() {
       structureFetched = true;
+      valid = true; // Re-validate node when structure is successfully fetched
       //Call process node requests from childRequests
-      givenPromises.forEach(function (promiseHandler, apiNode) {
-        if (apiNode.isValid()) {
-          promiseHandler.resolve(apiNode);
-        } else {
-          promiseHandler.reject(apiNode);
-        }
+      givenPromises.forEach(function (promiseHandlers, apiNode) {
+        promiseHandlers.forEach(function(promiseHandler) {
+          if (apiNode.isValid()) {
+            promiseHandler.resolve(apiNode);
+          } else {
+            promiseHandler.reject(apiNode);
+          }
+        });
       });
       givenPromises.clear();
 
       for (var i = 0; i < childIterators.length; i++) {
         childMap.forEach(childIterators[i]);
-        childIterators.splice(i, 1);
       }
+      childIterators.length = 0;
     };
 
     this.receiveValue = function (nodeValue, nodeTimestamp) {
@@ -515,7 +614,11 @@ studio.internal = (function(proto) {
 
     this.async.onDone = function(resolve, reject, apiNode) {
       if (!structureFetched) {
-        givenPromises.set(apiNode, {resolve: resolve, reject: reject});
+        // Support multiple callbacks per node (e.g., registerConnection + connectViaProxy)
+        if (!givenPromises.has(apiNode)) {
+          givenPromises.set(apiNode, []);
+        }
+        givenPromises.get(apiNode).push({resolve: resolve, reject: reject});
       } else {
         if (apiNode.isValid()) {
           resolve(apiNode);
@@ -530,12 +633,7 @@ studio.internal = (function(proto) {
     };
 
     this.async.unsubscribeFromStructure = function(structureConsumer) {
-      for (var i = 0; i < structureSubscriptions.length; i++) {
-        if (structureConsumer == structureSubscriptions[i]) {
-          structureSubscriptions.splice(i, 1);
-          break;
-        }
-      }
+      removeFirst(structureSubscriptions, function(s) { return s === structureConsumer; });
     };
 
     this.async.fetch = function() {
@@ -549,12 +647,7 @@ studio.internal = (function(proto) {
     };
 
     this.async.unsubscribeFromValues = function(valueConsumer) {
-      for (var i = 0; i < valueSubscriptions.length; i++) {
-        if (valueConsumer == valueSubscriptions[i][0]) {
-          valueSubscriptions.splice(i, 1);
-          break;
-        }
-      }
+      removeFirst(valueSubscriptions, function(s) { return s[0] === valueConsumer; });
       this._makeGetterRequest();
     };
 
@@ -564,12 +657,7 @@ studio.internal = (function(proto) {
     };
 
     this.async.unsubscribeFromEvents = function(eventConsumer) {
-      for (var i = 0; i < eventSubscriptions.length; i++) {
-        if (eventConsumer == eventSubscriptions[i][0]) {
-          eventSubscriptions.splice(i, 1);
-          break;
-        }
-      }
+      removeFirst(eventSubscriptions, function(s) { return s[0] === eventConsumer; });
       if (eventSubscriptions.length === 0)
         app.makeEventRequest(id, 0, true);
     };
@@ -596,71 +684,254 @@ studio.internal = (function(proto) {
         const zeroRate = valueSubscriptions.find(e => e[2] === 0);
         maxSampleRate = zeroRate ? zeroRate[2] : maxSampleRate;
         app.makeGetterRequest(id, maxFs, maxSampleRate, false);
-      } else {
+        hasActiveValueSubscription = true;
+      } else if (hasActiveValueSubscription) {
+        // Only send stop request if we previously subscribed
         app.makeGetterRequest(id, 1, 0, true);
+        hasActiveValueSubscription = false;
       }
     }
   }
 
-  obj.SystemNode = function(studioURL, notificationListener) {
-    var appConnections = [];
-    var pendingConnects = [];
-    var connected = false;
-    var connecting = false;
-    var this_ = this;
+	  obj.SystemNode = function(studioURL, notificationListener, onStructureChange) {
+	    var appConnections = [];
+	    var pendingConnects = [];
+	    var connected = false;
+	    var connecting = false;
+	    var connectGeneration = 0;
+	    var structureSubscriptions = [];
+	    var announcedApps = new Set();
+	    var pendingFetches = [];
+	    var this_ = this;
+
+    function isApplicationNode(node) {
+      var info = node.info();
+      return info && info.isLocal && info.nodeType === proto.CDPNodeType.CDP_APPLICATION;
+    }
+
+    function notifyStructure(name, change) {
+      // Notify internal cache invalidation callback (constructor param)
+      if (onStructureChange) {
+        try {
+          onStructureChange(name);
+        } catch (e) {
+          console.error("onStructureChange callback threw:", e);
+        }
+      }
+      // Notify user structure subscriptions
+      structureSubscriptions.forEach(function (cb) {
+        try {
+          cb(name, change);
+        } catch (e) {
+          console.error("Structure subscription callback threw:", e);
+        }
+      });
+    }
+
+    function notifyApplications(connection) {
+      connection.root().forEachChild(function (node) {
+        if (isApplicationNode(node) && !announcedApps.has(node.name())) {
+          announcedApps.add(node.name());
+          notifyStructure(node.name(), obj.structure.ADD);
+        }
+      });
+    }
+
+    function registerConnection(connection, resolve, reject) {
+      var sys = connection.root();
+      sys.async.onDone(function (system) {
+        notifyApplications(connection);
+        // Subscribe to structure changes to propagate app ADD/REMOVE at runtime
+        system.async.subscribeToStructure(function(appName, change) {
+          var node = system.child(appName);
+          if (change === obj.structure.ADD && node && isApplicationNode(node)) {
+            if (!announcedApps.has(appName)) {
+              announcedApps.add(appName);
+              notifyStructure(appName, obj.structure.ADD);
+            }
+          } else if (change === obj.structure.REMOVE && announcedApps.has(appName)) {
+            announcedApps.delete(appName);
+            notifyStructure(appName, obj.structure.REMOVE);
+          }
+        });
+        resolve(system);
+      }, reject, sys);
+    }
 
     this.onAppConnect = function(url, notificationListener, autoConnect) {
       return new Promise(function (resolve, reject) {
         var appConnection = new obj.AppConnection(url, notificationListener, autoConnect);
         appConnections.push(appConnection);
-        var sys = appConnection.root();
-        sys.async.onDone(resolve, reject, sys);
+        appConnection.onServiceConnectionEstablished = function(serviceConnection, instanceKey) {
+          serviceConnection.instanceKey = instanceKey;
+          appConnections.push(serviceConnection);
+          registerConnection(serviceConnection, function(){}, function(){});
+        };
+        appConnection.onServiceConnectionRemoved = function(instanceKey, closedByUser) {
+          var removed = appConnections.filter(function(con) { return con.instanceKey === instanceKey; });
+          removed.forEach(function(con) {
+            if (con.siblingKey) {
+              connectedSiblings.delete(con.siblingKey);
+            }
+            con.root().forEachChild(function(node) {
+              if (isApplicationNode(node) && announcedApps.has(node.name())) {
+                announcedApps.delete(node.name());
+                notifyStructure(node.name(), obj.structure.REMOVE);
+              }
+            });
+            if (closedByUser) {
+              con.invalidateAllNodes();
+              appConnections = appConnections.filter(function(c) { return c.instanceKey !== instanceKey; });
+            }
+            // Unintentional disconnect — keep AppConnection alive for reconnection
+          });
+        };
+        registerConnection(appConnection, resolve, reject);
       });
     };
 
-    this.onConnect = function(resolve, reject, autoConnect) {
-      if (connected) {
-        resolve(this_);
-        return;
-      }
+    var knownSiblings = new Set();
+    var connectedSiblings = new Set();
+
+    function tryConnectPendingSiblings(primaryConnection) {
+      knownSiblings.forEach(function(key) {
+        if (connectedSiblings.has(key)) {
+          return;
+        }
+        var parts = key.split(':');
+        var addr = parts[0], port = parts[1];
+        if (primaryConnection.isProxyAvailable(addr, port)) {
+          connectedSiblings.add(key);
+          // Check for existing disconnected AppConnection to reconnect
+          var existing = appConnections.find(function(con) { return con.siblingKey === key; });
+          primaryConnection.connectViaProxy(addr, port, existing).then(function(connection) {
+            // Re-announce apps after reconnection (or initial connection via proxy)
+            notifyApplications(connection);
+          }).catch(function(err) {
+            console.error("Failed to connect via proxy to " + key + ":", err);
+            connectedSiblings.delete(key);
+          });
+        }
+      });
+    }
+
+	    this.onConnect = function(resolve, reject, autoConnect) {
+	      if (connected) {
+	        resolve(this_);
+	        return;
+	      }
 
       if (connecting) {
         pendingConnects.push({resolve: resolve, reject: reject});
         return;
       }
 
-      connecting = true;
-      pendingConnects.push({resolve: resolve, reject: reject});
+	      connecting = true;
+	      var generation = ++connectGeneration;
+	      pendingConnects.push({resolve: resolve, reject: reject});
 
-      this.onAppConnect(studioURL, notificationListener, autoConnect).then(function(system){
-        var promises = [];
-        system.forEachChild(function (app) {
-          if (!app.info().isLocal)
-          {
-            var appUrl = app.info().serverAddr + ":" + app.info().serverPort;
-            promises.push(this_.onAppConnect(appUrl, notificationListener, autoConnect));
-          }
-        });
-        Promise.all(promises).then(function() {
-          pendingConnects.forEach(function(con) {
-            con.resolve(this_);
+	      this.onAppConnect(studioURL, notificationListener, autoConnect).then(function(system){
+	        if (generation !== connectGeneration) {
+	          return;
+	        }
+	        var promises = [];
+	        var primaryConnection = appConnections[0];
+
+        if (!primaryConnection || !primaryConnection.supportsProxyProtocol()) {
+          system.forEachChild(function (app) {
+            if (!app.info().isLocal)
+            {
+              var appUrl = app.info().serverAddr + ":" + app.info().serverPort;
+              promises.push(this_.onAppConnect(appUrl, notificationListener, autoConnect));
+            }
           });
-          pendingConnects = [];
-          connecting = false;
-          connected = true;
-        });
-      }, reject);
-    }
+        } else {
+          system.forEachChild(function (app) {
+            if (!app.info().isLocal) {
+              knownSiblings.add(app.info().serverAddr + ':' + app.info().serverPort);
+            }
+          });
+
+          system.async.subscribeToStructure(function(appName, change) {
+            if (change === obj.structure.ADD) {
+              var app = system.child(appName);
+              var appInfo = app && app.info();
+              if (app && appInfo) {
+                if (!appInfo.isLocal) {
+                  // Remote sibling - track for proxy connection
+                  knownSiblings.add(appInfo.serverAddr + ':' + appInfo.serverPort);
+                  tryConnectPendingSiblings(primaryConnection);
+                } else {
+                  // Local sibling came back - re-fetch and resubscribe through primary connection
+                  primaryConnection.resubscribe(app);
+                }
+              }
+            }
+          });
+
+          primaryConnection.onServicesUpdated = function() {
+            // Repopulate knownSiblings from current structure (handles reconnect case)
+            system.forEachChild(function (app) {
+              var appInfo = app.info();
+              if (appInfo && !appInfo.isLocal) {
+                knownSiblings.add(appInfo.serverAddr + ':' + appInfo.serverPort);
+              }
+            });
+            tryConnectPendingSiblings(primaryConnection);
+          };
+
+          tryConnectPendingSiblings(primaryConnection);
+        }
+
+	        Promise.all(promises).then(function() {
+	          if (generation !== connectGeneration) {
+	            return;
+	          }
+	          pendingConnects.forEach(function(con) {
+	            con.resolve(this_);
+	          });
+	          pendingConnects = [];
+	          connecting = false;
+	          connected = true;
+	        }).catch(function(err) {
+	          if (generation !== connectGeneration) {
+	            return;
+	          }
+	          console.error("Some sibling connections failed:", err);
+	          pendingConnects.forEach(function(con) {
+	            con.resolve(this_);
+	          });
+	          pendingConnects = [];
+	          connecting = false;
+	          connected = true;
+	        });
+	      }, function(err) {
+	        if (generation !== connectGeneration) {
+	          return;
+	        }
+	        // Reject all pending connect callers, not just the first one
+	        pendingConnects.forEach(function(con) {
+	          con.reject(err);
+	        });
+	        pendingConnects = [];
+	        connecting = false;
+	      });
+	    }
 
     this.applicationNodes = function() {
-      var nodes = [];
+      var nodesByName = new Map();
       appConnections.forEach(function(con) {
         con.root().forEachChild(function(app) {
-          if (app.info().isLocal)
-            nodes.push(app);
+          if (isApplicationNode(app)) {
+            var existing = nodesByName.get(app.name());
+            // Prefer valid nodes over invalid ones
+            if (!existing || (!existing.isValid() && app.isValid())) {
+              nodesByName.set(app.name(), app);
+            }
+          }
         });
       });
-      return nodes;
+      return Array.from(nodesByName.values());
     }
 
     this.isValid = function() {
@@ -668,14 +939,17 @@ studio.internal = (function(proto) {
     }
 
     this.name = function() {
+      if (appConnections.length === 0) return undefined;
       return appConnections[0].root().name();
     };
 
     this.info = function() {
+      if (appConnections.length === 0) return undefined;
       return appConnections[0].root().info();
     };
 
     this.lastValue = function() {
+      if (appConnections.length === 0) return undefined;
       return appConnections[0].root().lastValue();
     };
 
@@ -698,7 +972,7 @@ studio.internal = (function(proto) {
     this.async = {};
 
     this.async.fetch = function() {
-      this.applicationNodes().forEach(function (app) {
+      this_.applicationNodes().forEach(function (app) {
         pendingFetches.push(app);
         app.fetch();
       });
@@ -729,28 +1003,27 @@ studio.internal = (function(proto) {
     };
 
     this.async.subscribeToStructure = function(structureConsumer) {
-      this.applicationNodes().forEach(function (app) {
-        app.subscribeToStructure(structureConsumer);
-      });
+      // Only fire callbacks for NEW nodes, not existing ones.
+      // Use forEachChild() to iterate existing children.
+      structureSubscriptions.push(structureConsumer);
     };
 
     this.async.unsubscribeFromStructure = function(structureConsumer) {
-      this.applicationNodes().forEach(function (app) {
-        app.unsubscribeFromStructure(structureConsumer);
-      });
+      removeFirst(structureSubscriptions, function(s) { return s === structureConsumer; });
     };
 
     this.async.subscribeToEvents = function(eventConsumer, startingFrom) {
-      this.applicationNodes().forEach(function (app) {
-        app.subscribeToEvents(eventConsumer, startingFrom);
+      this_.applicationNodes().forEach(function (app) {
+        app.async.subscribeToEvents(eventConsumer, startingFrom);
       });
     };
 
     this.async.unsubscribeFromEvents = function(eventConsumer) {
-      this.applicationNodes().forEach(function (app) {
-        app.unsubscribeFromEvents(eventConsumer);
+      this_.applicationNodes().forEach(function (app) {
+        app.async.unsubscribeFromEvents(eventConsumer);
       });
     };
+
 
     this.async.addChild = function(name, modelName) {
 
@@ -763,15 +1036,90 @@ studio.internal = (function(proto) {
     this.async.setValue = function(value, timestamp) {
 
     };
+
+    this._getAppConnections = function() {
+      return appConnections;
+    };
+
+    /**
+     * Close all connections managed by this system node.
+     */
+	    this.close = function() {
+	      connectGeneration++;
+	      var err = new Error('Connection closed');
+	      pendingConnects.forEach(function(con) {
+	        try {
+	          con.reject(err);
+	        } catch (e) { /* ignore */ }
+	      });
+	      pendingConnects = [];
+	      pendingFetches = [];
+	      connected = false;
+	      connecting = false;
+	      appConnections.forEach(function(con) {
+	        try {
+	          con.invalidateAllNodes();
+	        } catch (e) { /* ignore */ }
+	      });
+	      appConnections.forEach(function(con) {
+	        con.close();
+	      });
+	      appConnections = [];
+	      knownSiblings.clear();
+	      connectedSiblings.clear();
+	      announcedApps.clear();
+	    };
+
   };
 
-  obj.AppConnection = function(url, notificationListener, autoConnect) {
+  // Transport abstraction for WebSocket and ServiceMessage multiplexing
+  function Transport() {
+    this.onopen = null;
+    this.onmessage = null;
+    this.onclose = null;
+    this.onerror = null;
+  }
+  Transport.prototype.send = function(bytes) { throw new Error("send not implemented"); };
+  Transport.prototype.close = function() { throw new Error("close not implemented"); };
+
+  function WebSocketTransport(url, binaryType) {
+    Transport.call(this);
+    this.reconnect(url, binaryType);
+  }
+  WebSocketTransport.prototype = Object.create(Transport.prototype);
+  WebSocketTransport.prototype.send = function(bytes) { this.ws.send(bytes); };
+  WebSocketTransport.prototype.close = function() { this.ws.close(); };
+  WebSocketTransport.prototype.readyState = function() { return this.ws.readyState; };
+  WebSocketTransport.prototype.reconnect = function(url, binaryType) {
+    var self = this;
+    if (this.ws) {
+      this.ws.onclose = null;  // Prevent triggering close handler
+      this.ws.close();
+    }
+    this.ws = new WebSocket(url);
+    this.ws.binaryType = binaryType;
+    this.ws.onopen = function(e) { self.onopen && self.onopen(e); };
+    this.ws.onmessage = function(e) { self.onmessage && self.onmessage(e); };
+    this.ws.onclose = function(e) { self.onclose && self.onclose(e); };
+    this.ws.onerror = function(e) { self.onerror && self.onerror(e); };
+  };
+
+  obj.AppConnection = function(urlOrTransport, notificationListener, autoConnect) {
     var appConnection = this;
-    var appName = "";
-    var appId = undefined;
-    var appUrl = composeUrl(url);
-    var socket = new WebSocket(appUrl);
-    var handler = new proto.Handler(socket, notificationListener);
+    var appUrl;
+    var socketTransport;
+    var isPrimaryConnection;
+
+    if (typeof urlOrTransport === 'string') {
+      appUrl = composeUrl(urlOrTransport);
+      socketTransport = new WebSocketTransport(appUrl, proto.BINARY_TYPE);
+      isPrimaryConnection = true;
+    } else {
+      socketTransport = urlOrTransport;
+      isPrimaryConnection = false;
+    }
+
+    var handler = new proto.Handler(socketTransport, notificationListener);
     var requests = [];
     var nodeMap = new Map();
     var systemNode = new AppNode(appConnection, proto.SYSTEM_NODE_ID);
@@ -780,7 +1128,15 @@ studio.internal = (function(proto) {
     var onError;
     var onOpen;
     var reauthRequestPending = false;
-    socket.binaryType = proto.BINARY_TYPE;
+    var availableServices = new Map();
+    var serviceConnections = new Map();
+    var serviceInstances = new Map();
+    var instanceCounters = new Map();
+    var servicesTimeoutId = null;
+    var reconnectTimeoutId = null;
+    var currentMetadata = null;
+    var closedIntentionally = false;  // Set by close() to prevent reconnection
+    var SERVICES_TIMEOUT_MS = 150000; // 120s resend interval + 30s buffer
     nodeMap.set(systemNode.id(), systemNode);
     handler.onContainer = handleIncomingContainer;
     this.resubscribe = function(item) {
@@ -800,10 +1156,389 @@ studio.internal = (function(proto) {
       return nodeMap.get(proto.SYSTEM_NODE_ID);
     };
 
+    this.services = function() {
+      return availableServices;
+    };
+
+    this.invalidateAllNodes = function() {
+      nodeMap.forEach(function(node) {
+        node.invalidate();
+      });
+    };
+
+    function allocateInstanceId(serviceId) {
+      var next = instanceCounters.get(serviceId) || 0;
+      instanceCounters.set(serviceId, next + 1);
+      return next;
+    }
+
+    var CONNECT_TIMEOUT_MS = 30000; // 30 second timeout for connect calls
+    var PROXY_MIN_COMPAT_VERSION = proto.PROXY_MIN_COMPAT_VERSION; // From protocol namespace
+
+    // Helper to schedule reconnection - avoids duplicate code in onError and onClosed
+    function scheduleReconnect(logMessage) {
+      if (!autoConnect || !isPrimaryConnection || reconnectTimeoutId) return;
+      reconnectTimeoutId = setTimeout(function() {
+        reconnectTimeoutId = null;
+        if (!socketTransport) return;
+        // Ensure proxy state is cleaned up (may already be done by onClosed, but
+        // onError can fire without onClose in Node.js — idempotent if already clean)
+        cleanupPrimaryConnectionState();
+        console.log(logMessage);
+        socketTransport.reconnect(appUrl, proto.BINARY_TYPE);
+        handler = new proto.Handler(socketTransport, notificationListener);
+        handler.onContainer = handleIncomingContainer;
+      }, 3000);
+    }
+
+    function removeServiceConnection(instanceKey, closedByUser) {
+      if (serviceConnections.has(instanceKey)) {
+        serviceConnections.delete(instanceKey);
+        if (appConnection.onServiceConnectionRemoved) {
+          appConnection.onServiceConnectionRemoved(instanceKey, closedByUser);
+        }
+      }
+    }
+
+    function makeServiceTransport(serviceId) {
+      var transport = new Transport();
+      var instanceId = allocateInstanceId(serviceId);
+      var instanceKey = serviceId + ':' + instanceId;
+      var connectTimeoutId = null;
+      var isConnected = false;
+      var isClosed = false;
+      var pendingSends = [];
+
+      // Cleanup helper - consolidates repeated cleanup pattern
+      function cleanup() {
+        isConnected = false;
+        isClosed = true;
+        clearTimeout(connectTimeoutId);
+        connectTimeoutId = null;
+        serviceInstances.delete(instanceKey);
+        removeServiceConnection(instanceKey, !!transport._closedByUser);
+        pendingSends = [];
+      }
+
+      function wireInstance() {
+        connectTimeoutId = setTimeout(function() {
+          if (!isConnected && serviceInstances.has(instanceKey)) {
+            var service = availableServices.get(serviceId);
+            var serviceName = service ? service.name : serviceId;
+            console.error("Connecting to service '" + serviceName + "' timed out after " + (CONNECT_TIMEOUT_MS/1000) + " seconds.");
+            transport.onerror && transport.onerror({ data: 'Connect timeout' });
+            transport.onclose && transport.onclose({ code: 1006, reason: 'Connect timeout' });
+            appConnection.sendServiceMessage(serviceId, instanceId, proto.ServiceMessageKind.eDisconnect);
+            cleanup();
+          }
+        }, CONNECT_TIMEOUT_MS);
+
+        serviceInstances.set(instanceKey, {
+          onMessage: function(serviceMsg) {
+            if (serviceMsg.kind === proto.ServiceMessageKind.eConnected) {
+              if (isConnected) return;  // Guard against duplicate eConnected messages
+              isConnected = true;
+              clearTimeout(connectTimeoutId);
+              connectTimeoutId = null;
+              pendingSends.forEach(function(bytes) {
+                appConnection.sendServiceMessage(serviceId, instanceId, proto.ServiceMessageKind.eData, bytes);
+              });
+              pendingSends = [];
+              transport.onopen && transport.onopen({});
+            } else if (serviceMsg.kind === proto.ServiceMessageKind.eData) {
+              transport.onmessage && transport.onmessage({ data: serviceMsg.payload });
+            } else if (serviceMsg.kind === proto.ServiceMessageKind.eError) {
+              cleanup();
+              transport.onerror && transport.onerror({ data: 'Service error' });
+              transport.onclose && transport.onclose({ code: 1006, reason: 'Service error' });
+            } else if (serviceMsg.kind === proto.ServiceMessageKind.eDisconnect) {
+              cleanup();
+              transport.onclose && transport.onclose({ code: 1000, reason: 'Service closed' });
+            }
+          }
+        });
+
+        appConnection.sendServiceMessage(serviceId, instanceId, proto.ServiceMessageKind.eConnect);
+      }
+
+      wireInstance();
+
+      transport.send = function(bytes) {
+        if (isClosed) return;  // Ignore sends after close
+        if (isConnected) {
+          appConnection.sendServiceMessage(serviceId, instanceId, proto.ServiceMessageKind.eData, bytes);
+        } else {
+          pendingSends.push(bytes);
+        }
+      };
+      transport.close = function() {
+        if (isClosed) return;  // Already closed
+        transport._closedByUser = true;
+        cleanup();
+        appConnection.sendServiceMessage(serviceId, instanceId, proto.ServiceMessageKind.eDisconnect);
+      };
+      transport.readyState = function() {
+        if (isClosed) return WebSocket.CLOSED;
+        return isConnected ? WebSocket.OPEN : WebSocket.CONNECTING;
+      };
+      transport.instanceKey = function() {
+        return instanceKey;
+      };
+      // Reconnect with a new service instance (analogous to WebSocketTransport.reconnect)
+      transport.reconnect = function(newServiceId) {
+        // Clear the old connect timeout to prevent it from killing the new connection
+        clearTimeout(connectTimeoutId);
+        connectTimeoutId = null;
+        serviceId = newServiceId;
+        instanceId = allocateInstanceId(serviceId);
+        instanceKey = serviceId + ':' + instanceId;
+        isConnected = false;
+        isClosed = false;
+        pendingSends = [];
+        wireInstance();
+      };
+
+      return { transport: transport, instanceKey: instanceKey };
+    }
+
+    function resendServicesRequest() {
+      if (currentMetadata && currentMetadata.compatVersion >= PROXY_MIN_COMPAT_VERSION) {
+        console.log("Did not receive services notification within expected interval. Re-requesting services.");
+        send(proto.createServicesRequestBytes());
+        resetServicesTimeout();
+      }
+    }
+
+    function resetServicesTimeout() {
+      clearTimeout(servicesTimeoutId);
+      if (currentMetadata && currentMetadata.compatVersion >= PROXY_MIN_COMPAT_VERSION && isPrimaryConnection) {
+        servicesTimeoutId = setTimeout(resendServicesRequest, SERVICES_TIMEOUT_MS);
+      }
+    }
+
+    function clearServicesTimeout() {
+      clearTimeout(servicesTimeoutId);
+      servicesTimeoutId = null;
+    }
+
+    function cleanupPrimaryConnectionState() {
+      if (!isPrimaryConnection) return;
+      // Notify service instances of disconnect
+      var keysToDisconnect = Array.from(serviceConnections.keys());
+      keysToDisconnect.forEach(function(instanceKey) {
+        if (serviceInstances.has(instanceKey)) {
+          serviceInstances.get(instanceKey).onMessage({ kind: proto.ServiceMessageKind.eDisconnect });
+        }
+      });
+      serviceConnections.clear();
+      serviceInstances.clear();
+      instanceCounters.clear();
+      availableServices.clear();
+      currentMetadata = null;
+      requests = [];
+    }
+
+    this.onServicesReceived = function(services, metadata) {
+      currentMetadata = metadata;
+
+      // Build set of received service IDs
+      var receivedServiceIds = new Set(services.map(function(s) { return Number(s.serviceId); }));
+
+      // Remove connections for services that are no longer present
+      if (isPrimaryConnection) {
+        var removedInstanceKeys = [];
+        serviceConnections.forEach(function(conn, instanceKey) {
+          var serviceId = Number(instanceKey.split(':')[0]);
+          if (!receivedServiceIds.has(serviceId)) {
+            removedInstanceKeys.push(instanceKey);
+          }
+        });
+        removedInstanceKeys.forEach(function(instanceKey) {
+          // Send disconnect to service transport - this will trigger onclose which handles cleanup
+          if (serviceInstances.has(instanceKey)) {
+            serviceInstances.get(instanceKey).onMessage({ kind: proto.ServiceMessageKind.eDisconnect });
+          }
+        });
+      }
+
+      availableServices.clear();
+      services.forEach(function(service) {
+        // Convert serviceId to Number for consistent Map key type (protobufjs v7 returns Long for uint64)
+        availableServices.set(Number(service.serviceId), service);
+      });
+
+      if (!isPrimaryConnection) {
+        return;
+      }
+
+      if (appConnection.onServicesUpdated) {
+        appConnection.onServicesUpdated();
+      }
+
+      resetServicesTimeout();
+    };
+
+    // Normalize host address by stripping ws://, wss://, and trailing slashes
+    function normalizeHost(host) {
+      if (!host) return host;
+      return host.replace(/^wss?:\/\//, '').replace(/\/$/, '');
+    }
+
+    this.findProxyService = function(addr, port) {
+      var portStr = String(port);
+      var normalizedAddr = normalizeHost(addr);
+      // Use for...of to allow early exit when found (forEach can't break)
+      for (var service of availableServices.values()) {
+        var serviceIp = service.metadata && service.metadata.ip_address;
+        if (service.type === 'websocketproxy' &&
+            serviceIp &&
+            service.metadata.port &&
+            service.metadata.proxy_type === 'studioapi') {
+          var serviceAddr = normalizeHost(serviceIp);
+          if (serviceAddr === normalizedAddr && service.metadata.port === portStr) {
+            return service;
+          }
+        }
+      }
+      return null;
+    };
+
+    this.isProxyAvailable = function(addr, port) {
+      return !!this.findProxyService(addr, port);
+    };
+
+    this.connectViaProxy = function(addr, port, existingConnection) {
+      var service = this.findProxyService(addr, port);
+      if (!service) {
+        return Promise.reject("No matching proxy service found for " + addr + ":" + port);
+      }
+
+      var proxyConnection;
+      var newServiceId = Number(service.serviceId);
+
+      if (existingConnection) {
+        // Reconnect existing transport with new service instance — preserves nodes and callbacks
+        proxyConnection = existingConnection;
+        proxyConnection.serviceId = newServiceId;
+        var transport = proxyConnection._getTransport();
+        // Set onopen to trigger handler recreation + resubscribe (the original onopen
+        // was overwritten by the first connectViaProxy call's new-connection handler)
+        transport.onopen = function() {
+          proxyConnection._triggerReconnect();
+        };
+        // Transport.reconnect() allocates a new instance and fires onopen when connected
+        transport.reconnect(newServiceId);
+        var instanceKey = transport.instanceKey();
+        proxyConnection.instanceKey = instanceKey;
+        serviceConnections.set(instanceKey, proxyConnection);
+      } else {
+        var result = makeServiceTransport(newServiceId);
+        proxyConnection = new obj.AppConnection(result.transport, notificationListener, autoConnect);
+        proxyConnection.instanceKey = result.instanceKey;
+        proxyConnection.siblingKey = addr + ':' + port;
+        proxyConnection.serviceId = newServiceId;
+        serviceConnections.set(result.instanceKey, proxyConnection);
+      }
+
+      // Wait for connection AND structure to be ready before resolving
+      return new Promise(function(resolve, reject) {
+        var settled = false;
+
+        function rejectOnce(err) {
+          if (!settled) {
+            settled = true;
+            reject(err);
+          }
+        }
+
+        if (!existingConnection) {
+          var transport = proxyConnection._getTransport();
+          transport.onopen = function() {
+            if (appConnection.onServiceConnectionEstablished) {
+              appConnection.onServiceConnectionEstablished(proxyConnection, proxyConnection.instanceKey);
+            }
+            // Wait for structure before resolving
+            var sys = proxyConnection.root();
+            sys.async.onDone(function() {
+              if (!settled) {
+                settled = true;
+                resolve(proxyConnection);
+              }
+            }, function() {
+              rejectOnce(new Error('Connection closed before structure'));
+            }, sys);
+          };
+          transport.onerror = function(event) {
+            rejectOnce(new Error(event.data || 'Connection error'));
+          };
+          transport.onclose = function(event) {
+            rejectOnce(new Error(event.reason || 'Connection closed'));
+          };
+        } else {
+          // For reconnection, the AppConnection's onOpen calls resubscribe(systemNode).
+          // We just need to wait for structure to resolve the promise.
+          var sys = proxyConnection.root();
+          sys.async.onDone(function() {
+            if (!settled) {
+              settled = true;
+              resolve(proxyConnection);
+            }
+          }, function() {
+            rejectOnce(new Error('Connection closed before structure'));
+          }, sys);
+        }
+      });
+    };
+
+    this.onServiceMessage = function(serviceMessage) {
+      // Convert to Number for consistent key type (protobufjs v7 returns Long for uint64)
+      var instanceKey = Number(serviceMessage.serviceId) + ':' + Number(serviceMessage.instanceId || 0);
+      var instanceHandler = serviceInstances.get(instanceKey);
+      if (instanceHandler) {
+        instanceHandler.onMessage(serviceMessage);
+      }
+    };
+
+    this.sendServiceMessage = function(serviceId, instanceId, kind, payload) {
+      var serviceMessage = proto.ServiceMessage.create({
+        serviceId: serviceId,
+        instanceId: instanceId || 0,
+        kind: kind
+      });
+      if (payload) {
+        serviceMessage.payload = payload;
+      }
+      var msg = proto.Container.create();
+      msg.messageType = proto.ContainerType.eServiceMessage;
+      msg.serviceMessage = [serviceMessage];
+      send(proto.Container.encode(msg).finish());
+    };
+
+    // Returns true if proxy protocol is supported (compat >= PROXY_MIN_COMPAT_VERSION)
+    // When true, backends are accessed via ServiceMessage tunneling, not direct connections
+    this.supportsProxyProtocol = function() {
+      return currentMetadata && currentMetadata.compatVersion >= PROXY_MIN_COMPAT_VERSION;
+    };
+
     onMessage = function(evt) { handler.handle(evt.data); };
-    onError = function (ev) { console.log("Socket error: " + ev.data); };
-    onOpen = function() { appConnection.resubscribe(systemNode); };
+    onError = function (ev) {
+      if (closedIntentionally) return;
+      console.log("Socket error: " + ev.data);
+      // Schedule reconnect on error if close doesn't fire (Node.js ws behavior)
+      scheduleReconnect("Retrying reconnect after error...");
+    };
+    onOpen = function() {
+      // Clear any pending reconnect timeout since we're now connected
+      clearTimeout(reconnectTimeoutId);
+      reconnectTimeoutId = null;
+      // Note: For proxy connections, connectViaProxy overwrites transport.onopen
+      // with _triggerReconnect(), so this handler only fires for the primary connection.
+      // Primary handler recreation happens in scheduleReconnect before reconnect().
+      appConnection.resubscribe(systemNode);
+    };
     onClosed = function (event) {
+      if (closedIntentionally) return;
+
       var reason;
 
       if (event.code == 1000)
@@ -837,26 +1572,19 @@ studio.internal = (function(proto) {
 
       console.log("Socket close: " + reason);
 
-      if (autoConnect)
-      {
-        setTimeout(function () {
-          console.log("Trying to reconnect", appUrl);
-          socket = new WebSocket(appUrl);
-          handler = new proto.Handler(socket, notificationListener);
-          handler.onContainer = handleIncomingContainer;
-          socket.binaryType = proto.BINARY_TYPE;
-          socket.onopen = onOpen;
-          socket.onclose = onClosed;
-          socket.onmessage = onMessage;
-          socket.onerror = onError;
-        }, 3000);
-      }
+      clearServicesTimeout();
+      clearTimeout(reconnectTimeoutId);
+      reconnectTimeoutId = null;
+      reauthRequestPending = false;  // Reset to allow reauth on reconnect
+      cleanupPrimaryConnectionState();
+
+      scheduleReconnect("Trying to reconnect " + appUrl);
     };
 
-    socket.onopen = onOpen;
-    socket.onclose = onClosed;
-    socket.onmessage = onMessage;
-    socket.onerror = onError;
+    socketTransport.onopen = onOpen;
+    socketTransport.onclose = onClosed;
+    socketTransport.onmessage = onMessage;
+    socketTransport.onerror = onError;
 
     function composeUrl(url) {
       var result = (location.protocol=="https:" ? proto.WSS_PREFIX : proto.WS_PREFIX) + url; //default
@@ -875,16 +1603,18 @@ studio.internal = (function(proto) {
     }
 
     function send(message) {
-      if (socket.readyState == WebSocket.OPEN) {
-        socket.send(message);
+      if (!socketTransport) return;  // Connection was closed
+      if (socketTransport.readyState() == WebSocket.OPEN) {
+        socketTransport.send(message);
       } else {
         requests.push(message);
       }
     }
 
     function flushRequests() {
+      if (!socketTransport) return;  // Connection was closed
       for (var i = 0; i < requests.length; i++) {
-        socket.send(requests[i]);
+        socketTransport.send(requests[i]);
       }
       requests = [];
     }
@@ -903,7 +1633,7 @@ studio.internal = (function(proto) {
       var request = proto.ValueRequest.create();
       request.nodeId = id;
       request.fs = fs;
-      if (sampleRate) {
+      if (sampleRate !== undefined) {
         request.sampleRate = sampleRate;
       }
       if (stop) {
@@ -964,14 +1694,19 @@ studio.internal = (function(proto) {
     };
 
     function makeReauthRequest(dict, challenge) {
+      // Set flag BEFORE async to prevent race condition with rapid AUTH_RESPONSE_EXPIRED errors
+      reauthRequestPending = true;
       proto.CreateAuthRequest(dict, challenge)
         .then(function(request){
           var msg = proto.Container.create();
           msg.messageType = proto.ContainerType.eReauthRequest;
           msg.reAuthRequest = request;
           send(proto.Container.encode(msg).finish());
-          reauthRequestPending = true;
         })
+        .catch(function(err) {
+          console.error("Failed to create reauth request:", err);
+          reauthRequestPending = false;
+        });
     };
 
     function addChildNode(parentNode, protoNode) {
@@ -996,11 +1731,18 @@ studio.internal = (function(proto) {
     }
 
     function removeMissingChildNodesByNames(parentNode, names) {
-      parentNode.forEachChild(function (childNode, name) {
+      // Collect nodes to remove first to avoid modifying Map during iteration
+      // Use forEachChildImmediate to iterate directly without structureFetched check
+      // (during structure parsing, structureFetched is false until done() is called)
+      var toRemove = [];
+      parentNode.forEachChildImmediate(function (childNode, name) {
         if (names.indexOf(name) === -1) {
-          parentNode.remove(childNode);
-          nodeMap.delete(childNode.id());
+          toRemove.push(childNode);
         }
+      });
+      toRemove.forEach(function(childNode) {
+        parentNode.remove(childNode);
+        nodeMap.delete(childNode.id());
       });
     }
 
@@ -1018,12 +1760,6 @@ studio.internal = (function(proto) {
     function parseSystemNode(node, protoNode){
       node.update(systemNode,protoNode.info);
       parseNodes(node, protoNode);
-      systemNode.forEachChild(function(childNode) {
-        if (childNode.info().isLocal) {
-          appName = childNode.name();
-          appId = childNode.id();
-        }
-      });
     }
 
     function parseStructureResponse(protoResponse) {
@@ -1043,8 +1779,9 @@ studio.internal = (function(proto) {
       for (var i = 0; i < protoResponse.length; i++) {
         var variantValue = protoResponse[i];
         var node = nodeMap.get(variantValue.nodeId);
-        if (node)
+        if (node) {
           node.receiveValue(proto.valueFromVariant(variantValue, node.info().valueType), variantValue.timestamp);
+        }
       }
     }
 
@@ -1084,6 +1821,7 @@ studio.internal = (function(proto) {
           makeReauthRequest(dict, metadata.challenge);
         })
         .catch(function(err){
+          reauthRequestPending = false;  // Allow retry on next eAUTH_RESPONSE_EXPIRED
           console.log("Authentication failed.", err)
         });
     }
@@ -1098,16 +1836,27 @@ studio.internal = (function(proto) {
 
     function parseErrorResponse(protoResponse, metadata) {
       if (!reauthRequestPending && protoResponse.code == proto.RemoteErrorCode.eAUTH_RESPONSE_EXPIRED) {
+        reauthRequestPending = true;  // Set BEFORE async to prevent duplicate reauth calls
         var userAuthResult = new studio.api.UserAuthResult(proto.AuthResultCode.eReauthenticationRequired, protoResponse.text, null);
         metadata.challenge = protoResponse.challenge;
         reauthenticate(userAuthResult, metadata);
-     }
+      }
       else
         console.log("Received error response with code " + protoResponse.code
           + ' and text: "' + protoResponse.text + '"');
     }
 
     function handleIncomingContainer(protoContainer, metadata) {
+      // Set currentMetadata from Hello message immediately (not just on ServicesNotification)
+      // This ensures supportsProxyProtocol() works before ServicesNotification arrives
+      if (!currentMetadata && metadata) {
+        currentMetadata = metadata;
+        // Start services timeout for primary connections with proxy support
+        // This handles the case where ServicesNotification is never received
+        if (isPrimaryConnection && metadata.compatVersion >= PROXY_MIN_COMPAT_VERSION && !servicesTimeoutId) {
+          resetServicesTimeout();
+        }
+      }
       switch(protoContainer.messageType){
         case proto.ContainerType.eStructureResponse:
           parseStructureResponse(protoContainer.structureResponse);
@@ -1128,11 +1877,58 @@ studio.internal = (function(proto) {
           break;
         case proto.ContainerType.eRemoteError:
           parseErrorResponse(protoContainer.error, metadata);
+          break;
+        case proto.ContainerType.eServicesNotification:
+          if (protoContainer.servicesNotification && protoContainer.servicesNotification.services) {
+            appConnection.onServicesReceived(protoContainer.servicesNotification.services, metadata);
+          }
+          break;
+        case proto.ContainerType.eServiceMessage:
+          if (protoContainer.serviceMessage) {
+            protoContainer.serviceMessage.forEach(function(msg) {
+              appConnection.onServiceMessage(msg);
+            });
+          }
+          break;
         default:
           //TODO: Indicate error to Client
       }
       flushRequests();
     }
+
+    this._getTransport = function() {
+      return socketTransport;
+    };
+
+    // Trigger reconnection logic for proxy connections (called by connectViaProxy on reconnect)
+    this._triggerReconnect = function() {
+      handler = new proto.Handler(socketTransport, notificationListener);
+      handler.onContainer = handleIncomingContainer;
+      appConnection.resubscribe(systemNode);
+    };
+
+    /**
+     * Close this connection.
+     * For proxy connections, this sends a disconnect message through the service tunnel.
+     * For primary connections, this closes the WebSocket.
+     */
+    this.close = function() {
+      // Mark as intentionally closed to prevent reconnection attempts
+      closedIntentionally = true;
+      // Clear pending reconnect to prevent accessing null socketTransport
+      clearTimeout(reconnectTimeoutId);
+      reconnectTimeoutId = null;
+      // Clear services timeout to prevent timer firing after close
+      clearServicesTimeout();
+      // Reset auth state to prevent stale state on reconnect
+      reauthRequestPending = false;
+      cleanupPrimaryConnectionState();
+      if (socketTransport) {
+        var transport = socketTransport;
+        socketTransport = null;  // Guard against double-close
+        transport.close();
+      }
+    };
   };
 
   return obj;
@@ -1209,41 +2005,46 @@ studio.api = (function(internal) {
 
     /**
      * Request named child node of this node.
+     * Returns synchronously for cached nodes.
      *
      * @param name
-     * @returns {Promise.<INode>} A promise containing named child node when fulfilled.
+     * @returns {Promise.<INode>} Promise that resolves to INode or rejects if child not found.
      */
     this.child = function(name) {
+      // SystemNode provides synchronous child access
+      if (node.applicationNodes) {
+        var childNode = node.child(name);
+        if (childNode) {
+          return Promise.resolve(new INode(childNode));
+        } else {
+          return Promise.reject("Child named '" + name + "' not found");
+        }
+      }
+
+      // Helper to resolve a child node, fetching structure if needed
+      function resolveChild(childNode, resolve, reject) {
+        if (!childNode) {
+          reject("Child named '" + name + "' not found");
+          return;
+        }
+        var iNode = new INode(childNode);
+        if (!childNode.isStructureFetched()) {
+          childNode.async.fetch();
+          childNode.async.onDone(resolve, reject, iNode);
+        } else {
+          resolve(iNode);
+        }
+      }
+
+      // AppNode - async access for children that may need structure fetching
       if (node.isValid()) {
         return new Promise(function (resolve, reject) {
           if (node.isStructureFetched()) {
-            var childNode = node.child(name);
-            if (childNode) {
-              var iNode = new INode(childNode);
-              if (!childNode.isStructureFetched()) {
-                childNode.async.fetch();
-                childNode.async.onDone(resolve, reject, iNode);
-              } else {
-                resolve(iNode);
-              }
-            } else {
-              reject("Child named '" + name + "' not found");
-            }
+            resolveChild(node.child(name), resolve, reject);
           } else {
             node.async.fetch();
             node.async.onDone(function () {
-              var childNode = node.child(name);
-              if (childNode) {
-                var iNode = new INode(childNode);
-                if (!childNode.isStructureFetched()) {
-                  childNode.async.fetch();
-                  childNode.async.onDone(resolve, reject, iNode);
-                } else {
-                  resolve(iNode);
-                }
-              } else {
-                reject("Child named '" + name + "' not found");
-              }
+              resolveChild(node.child(name), resolve, reject);
             }, reject, new INode(node))
           }
         });
@@ -1284,7 +2085,9 @@ studio.api = (function(internal) {
     this.subscribeToChildValues = function(name, valueConsumer, fs=5, sampleRate=0) {
       instance.child(name).then(function (child) {
         child.subscribeToValues(valueConsumer, fs, sampleRate);
-      }, function (){ console.log("subscribeToChildValues() Child not found "+ name) });
+      }).catch(function (err) {
+        console.log("subscribeToChildValues() Child not found: " + name, err);
+      });
     };
 
     /**
@@ -1305,7 +2108,9 @@ studio.api = (function(internal) {
     this.unsubscribeFromChildValues = function(name, valueConsumer) {
       instance.child(name).then(function (child) {
         child.unsubscribeFromValues(valueConsumer);
-      }, function (){ console.log("unsubscribeFromChildValues() Child not found "+ name) });
+      }).catch(function (err) {
+        console.log("unsubscribeFromChildValues() Child not found: " + name, err);
+      });
     };
 
     /**
@@ -1334,17 +2139,6 @@ studio.api = (function(internal) {
       node.async.unsubscribeFromStructure(structureConsumer);
     };
 
-
-    /**
-     * Subscribe to value changes on this node.
-     *
-     * @param {valueConsumer} valueConsumer
-     * @param {fs} Maximum frequency that value updates are expected (controls how many changes are sent in a single packet). Defaults to 5 hz.
-     * @param {sampleRate} Maximum amount of value updates sent per second (controls the amount of data transferred). Zero means all samples must be provided. Defaults to 0.
-     */
-    this.subscribeToValues = function(valueConsumer, fs=5, sampleRate=0) {
-      node.async.subscribeToValues(valueConsumer, fs, sampleRate);
-    };
 
     /**
      * Subscribe to events on this node.
@@ -1437,7 +2231,12 @@ studio.api = (function(internal) {
    * @constructor
    */
   obj.Client = function(studioURL, notificationListener, autoConnect = true) {
-    var system = new internal.SystemNode(studioURL, notificationListener);
+    var findNodeCacheInvalidator = null;  // Set after findNodeCache is created
+
+    var system = new internal.SystemNode(studioURL, notificationListener, function(appName) {
+      // Called when app structure changes (ADD or REMOVE)
+      findNodeCacheInvalidator(appName);
+    });
 
     /**
      * Request root node.
@@ -1453,16 +2252,13 @@ studio.api = (function(internal) {
     };
 
     /**
-     * Request next node on path.
-     *
-     * @param promise Total from reduce() function
-     * @param nodeName The currentValue from reduce() function
-     * @param index The index of the nodeName in the array of nodes
-     * @param arr The array containing all the node names in the route path
-     *
-     * @returns {Promise.<INode>} A promise containing the node for the current location on the path
+     * Close all connections.
      */
-    var findNode = (function() {
+    this.close = function() {
+      system.close();
+    };
+
+    var findNodeCache = (function() {
       var memoize = {};
       var nodes = {};
 
@@ -1484,8 +2280,22 @@ studio.api = (function(internal) {
                 return new Promise(function(resolve, reject) { reject("Child not found: " + path); });
               });
       }
+
+      // Invalidate cache entries for a specific app name (called on structure changes)
+      f.invalidateApp = function(appName) {
+        Object.keys(memoize).forEach(function(key) {
+          // Key is array converted to string, e.g. "App2" or "App2,CPULoad"
+          if (key === appName || key.startsWith(appName + ',')) {
+            delete memoize[key];
+            delete nodes[key];
+          }
+        });
+      };
+
       return f;
     })();
+    var findNode = findNodeCache;
+    findNodeCacheInvalidator = findNodeCache.invalidateApp;
     /**
      * Request node with provided path.
      *
@@ -1496,6 +2306,11 @@ studio.api = (function(internal) {
       var nodes = nodePath.split(".");
       return nodes.reduce(findNode, this.root());
     };
+
+    this._getAppConnections = function() {
+      return system._getAppConnections();
+    };
+
 
   };
 
@@ -1510,5 +2325,4 @@ if (typeof module !== 'undefined' && module.exports) {
 } else if (typeof globalThis !== 'undefined') {
   globalThis.studio = studio;
 }
-
 
