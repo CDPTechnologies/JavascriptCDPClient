@@ -521,9 +521,7 @@ describe('Value Delivery', () => {
     expect(systemNode.lastValue()).toBe(43.5);
   });
 
-  test('calling receiveValue twice with same timestamp should still call callback twice (no dedup)', () => {
-    // This tests that receiveValue is a simple passthrough - it doesn't deduplicate
-    // Deduplication should happen at a higher level if needed
+  test('calling receiveValue twice with same value and increasing timestamps delivers both', () => {
     const transport = new FakeTransport();
     const app = new internal.AppConnection(transport, null, false);
 
@@ -532,12 +530,17 @@ describe('Value Delivery', () => {
 
     app.root().async.subscribeToValues(valueConsumer, 5, 0);
 
-    // Intentionally send same value twice (simulates potential duplicate from reconnect)
     app.root().receiveValue(100, 1000);
-    app.root().receiveValue(100, 1000); // Same timestamp!
-
-    // This tests current behavior - if the implementation SHOULD deduplicate, this test documents it doesn't
+    app.root().receiveValue(100, 1001); // same value, newer timestamp — delivered
     expect(callbackCount.count).toBe(2);
+
+    // Same value with OLDER timestamp — filtered (reconnect replay)
+    app.root().receiveValue(100, 999);
+    expect(callbackCount.count).toBe(2);
+
+    // Different value with SAME timestamp as last — delivered (not filtered)
+    app.root().receiveValue(200, 1001);
+    expect(callbackCount.count).toBe(3);
   });
 });
 
