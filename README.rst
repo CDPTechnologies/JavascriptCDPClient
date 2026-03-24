@@ -38,6 +38,8 @@ Example
           root.subscribeToStructure((name, change) => {
             if (change === studio.api.structure.ADD)
               subscribeToApp(name);
+            if (change === studio.api.structure.RECONNECT)
+              console.log(`${name} restarted, subscriptions intact`);
           });
         }).catch(err => console.error("Connection failed:", err));
 
@@ -60,6 +62,38 @@ Benefits
 
 - Simplified firewall configuration - only one port needs to be opened
 - SSH port forwarding - forward a single port to access entire CDP system
+
+Structure Events
+----------------
+
+The ``subscribeToStructure`` callback receives three event types:
+
+- ``studio.api.structure.ADD`` (1) — An application appeared for the first time
+- ``studio.api.structure.REMOVE`` (0) — An application went offline
+- ``studio.api.structure.RECONNECT`` (2) — An application restarted (was seen before, went offline, came back)
+
+The RECONNECT event distinguishes first-time discovery from application restarts. When an app
+restarts, the client automatically restores value and event subscriptions, so user code does
+not need to re-subscribe. RECONNECT is informational — use it for logging or UI updates.
+
+    .. code:: javascript
+
+        client.root().then(root => {
+          root.subscribeToStructure((appName, change) => {
+            if (change === studio.api.structure.ADD) {
+              console.log(`New app online: ${appName}`);
+              client.find(appName + '.CPULoad').then(node => {
+                node.subscribeToValues(v => console.log(`[${appName}] CPULoad: ${v}`));
+              }).catch(err => console.error(`Failed to find ${appName}.CPULoad:`, err));
+            }
+            if (change === studio.api.structure.REMOVE) {
+              console.log(`App offline: ${appName}`);
+            }
+            if (change === studio.api.structure.RECONNECT) {
+              console.log(`App restarted: ${appName}, subscriptions intact`);
+            }
+          });
+        }).catch(err => console.error("Connection failed:", err));
 
 API
 ---
@@ -325,31 +359,45 @@ client.root()
           // use the system INode object to access connected structure.
         });
 
-client.find(path)
-^^^^^^^^^^^^^^^^^
+client.find(path, options)
+^^^^^^^^^^^^^^^^^^^^^^^^^
 
 - Arguments
 
-    path - Path of the object to look for.
+    path - Dot-separated path to target node (e.g. ``'App2.CPULoad'``).
+
+    options - Optional object. ``{ timeout: milliseconds }`` to limit wait time.
+    Use ``{ timeout: 0 }`` to fail immediately if the app is not available.
 
 - Returns
 
     Promise containing requested INode object when fulfilled.
 
-- Restriction
+- Behavior
 
-    The requested node must reside in the application client was connected to.
+    Waits indefinitely for the target application to appear. If the application is already
+    available, resolves immediately. No prior ``root()`` call is needed — ``find()`` triggers
+    the connection internally.
 
-- Usage
-
-    The provided path must contain dot separated path to target node. **Root node is not considered part of the path.**
-
-- Example
+- Examples
 
     .. code:: javascript
 
-        client.find("MyApp.CPULoad").then(function (load) {
-          // use the load object referring to CPULoad in MyApp
+        // Waits indefinitely for App2 to appear
+        client.find("App2.CPULoad").then(function (load) {
+          load.subscribeToValues(function (value) {
+            console.log("CPULoad:", value);
+          });
+        });
+
+        // Wait up to 5 seconds
+        client.find("App2.CPULoad", { timeout: 5000 }).catch(function (err) {
+          console.log(err.message); // "App2 not found within 5000ms"
+        });
+
+        // Fail immediately if not available (old behavior)
+        client.find("App2.CPULoad", { timeout: 0 }).catch(function (err) {
+          console.log("Not available right now");
         });
 
 client.close()
@@ -604,8 +652,9 @@ node.subscribeToStructure(structureConsumer)
 
 - Usage
 
-    Subscribe to structure changes on this node. Each time child is added or removed from current node
-    structureConsumer function is called with the name of the node and change argument where ADD == 1 and REMOVE == 0.
+    Subscribe to structure changes on this node. Each time a child is added or removed,
+    structureConsumer is called with the child name and change (ADD == 1, REMOVE == 0).
+    On the root node, RECONNECT (2) fires when a previously-seen application restarts.
 
 node.unsubscribeFromStructure(structureConsumer)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

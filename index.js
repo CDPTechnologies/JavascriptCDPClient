@@ -398,8 +398,8 @@ studio.protocol = (function(ProtoBuf) {
               resolve(new ContainerHandler(onContainer, onError, metadata));
             }
           })
-          .catch(function(){
-            console.log("Application acceptance denied.")
+          .catch(function(err){
+            console.error("Application acceptance failed:", err);
             resolve(this);
           }.bind(this));
       }.bind(this));
@@ -455,8 +455,14 @@ studio.internal = (function(proto) {
 
   obj.structure  = {
     REMOVE: 0,
-    ADD: 1
+    ADD: 1,
+    RECONNECT: 2
   };
+
+  var STRUCTURE_REQUEST_TIMEOUT_MS = 30000;
+  var MAX_RECONNECT_DELAY_MS = 30000;
+  var INITIAL_RECONNECT_DELAY_MS = 1000;
+  var INACTIVITY_RESEND_INTERVAL_S = 120;
 
   // Helper to remove first matching item from array (shared by AppNode and SystemNode)
   function removeFirst(array, predicate) {
@@ -479,6 +485,9 @@ studio.internal = (function(proto) {
     var lastInfo = null; //when we get this, if there are any child requests we need to fetch child fetch too
     var valid = true;
     var hasActiveValueSubscription = false; // track if we've sent a getter request to server
+    var lastServerTimestamp = null; // for value dedup after reconnect
+    var lastEventTimestamp = 0; // track last received event timestamp for reconnect resume
+    var recentEventIds = new Map(); // eventId → timestamp for dedup (30s sliding window)
 
     this.path = function() {
       var path = "";
@@ -514,6 +523,7 @@ studio.internal = (function(proto) {
       givenPromises.forEach(function(promiseHandlers, apiNode) {
         promiseHandlers.forEach(function(promiseHandler) {
           try {
+            clearTimeout(promiseHandler.timer);
             promiseHandler.reject(apiNode);
           } catch (e) { /* ignore */ }
         });
@@ -522,7 +532,7 @@ studio.internal = (function(proto) {
     };
 
     this.hasSubscriptions = function() {
-      return valueSubscriptions.length > 0;
+      return valueSubscriptions.length > 0 || eventSubscriptions.length > 0;
     };
 
     this.info = function() {
@@ -552,9 +562,18 @@ studio.internal = (function(proto) {
       parent = nodeParent;
       lastInfo = protoInfo;
       id = protoInfo.nodeId;
+      // Keep lastServerTimestamp across reconnect — restarted apps produce newer
+      // timestamps, so the server's replayed last-known-value (which has the old
+      // timestamp) is correctly filtered by the dedup check in receiveValue().
+      // Keep recentEventIds across reconnect — the 30s sliding window handles
+      // cleanup, and preserving it prevents the server's inclusive startingFrom
+      // replay from delivering the boundary event as a duplicate.
       this.async._makeGetterRequest();
-      for (var i = 0; i < eventSubscriptions.length; i++)
-        app.makeEventRequest(id, eventSubscriptions[i][1], false);
+      for (var i = 0; i < eventSubscriptions.length; i++) {
+        // Resume from last received event timestamp (not original startingFrom) to avoid duplicates
+        var resumeFrom = lastEventTimestamp > 0 ? lastEventTimestamp : eventSubscriptions[i][1];
+        app.makeEventRequest(id, resumeFrom, false);
+      }
     };
 
     this.add = function(node) {
@@ -579,7 +598,6 @@ studio.internal = (function(proto) {
     this.done = function() {
       structureFetched = true;
       valid = true; // Re-validate node when structure is successfully fetched
-      //Call process node requests from childRequests
       givenPromises.forEach(function (promiseHandlers, apiNode) {
         promiseHandlers.forEach(function(promiseHandler) {
           if (apiNode.isValid()) {
@@ -598,6 +616,17 @@ studio.internal = (function(proto) {
     };
 
     this.receiveValue = function (nodeValue, nodeTimestamp) {
+      // Dedup: skip values with strictly older timestamps (happens after reconnect
+      // when server replays last known value). Uses strict less-than so that
+      // legitimate same-timestamp values are not dropped.
+      if (nodeTimestamp !== undefined) {
+        var ts = Number(nodeTimestamp);
+        if (ts > 0) {
+          if (lastServerTimestamp !== null && ts < lastServerTimestamp)
+            return;
+          lastServerTimestamp = ts;
+        }
+      }
       lastValue = nodeValue;
       for (var i = 0; i < valueSubscriptions.length; i++) {
         valueSubscriptions[i][0](nodeValue, nodeTimestamp);
@@ -605,6 +634,27 @@ studio.internal = (function(proto) {
     };
 
     this.receiveEvent = function (event) {
+      if (event.timestamp !== undefined) {
+        var ts = Number(event.timestamp);
+        if (ts > lastEventTimestamp) lastEventTimestamp = ts;
+        // Event dedup: skip events already delivered (can happen after reconnect).
+        // Use String(event.id) as Map key because protobufjs returns Long objects
+        // for uint64 fields, and Long objects use reference equality in Map.
+        if (event.id !== undefined) {
+          var eventKey = String(event.id);
+          if (recentEventIds.has(eventKey) && recentEventIds.get(eventKey) >= ts) {
+            return; // duplicate
+          }
+          recentEventIds.set(eventKey, ts);
+          // Trim when map grows large (30s sliding window in nanoseconds)
+          if (recentEventIds.size > 200 && ts > 0) {
+            var cutoff = ts - 30e9;
+            recentEventIds.forEach(function(storedTs, evId) {
+              if (storedTs < cutoff) recentEventIds.delete(evId);
+            });
+          }
+        }
+      }
       for (var i = 0; i < eventSubscriptions.length; i++) {
         eventSubscriptions[i][0](event);
       }
@@ -618,7 +668,23 @@ studio.internal = (function(proto) {
         if (!givenPromises.has(apiNode)) {
           givenPromises.set(apiNode, []);
         }
-        givenPromises.get(apiNode).push({resolve: resolve, reject: reject});
+        var settled = false;
+        var entry = {
+          resolve: function(v) { if (!settled) { settled = true; clearTimeout(entry.timer); resolve(v); } },
+          reject: function(v) { if (!settled) { settled = true; clearTimeout(entry.timer); reject(v); } },
+          timer: setTimeout(function() {
+            if (!settled) {
+              settled = true;
+              // Remove from givenPromises to prevent double-fire
+              var arr = givenPromises.get(apiNode);
+              var idx = arr.indexOf(entry);
+              if (idx >= 0) arr.splice(idx, 1);
+              if (arr.length === 0) givenPromises.delete(apiNode);
+              reject(new Error("Structure request timed out after " + STRUCTURE_REQUEST_TIMEOUT_MS + "ms"));
+            }
+          }, STRUCTURE_REQUEST_TIMEOUT_MS)
+        };
+        givenPromises.get(apiNode).push(entry);
       } else {
         if (apiNode.isValid()) {
           resolve(apiNode);
@@ -699,14 +765,22 @@ studio.internal = (function(proto) {
 	    var connected = false;
 	    var connecting = false;
 	    var connectGeneration = 0;
+	    var isClosed = false;
 	    var structureSubscriptions = [];
 	    var announcedApps = new Set();
+	    var everSeenApps = new Set();
+	    var pendingFindWaiters = []; // for find() waiting on late apps
 	    var pendingFetches = [];
+	    var connectionLocalApps = new Map(); // Maps AppConnection → local app name (direct mode)
 	    var this_ = this;
 
     function isApplicationNode(node) {
       var info = node.info();
       return info && info.isLocal && info.nodeType === proto.CDPNodeType.CDP_APPLICATION;
+    }
+
+    function appAddress(info) {
+      return info.serverAddr + ':' + info.serverPort;
     }
 
     function notifyStructure(name, change) {
@@ -728,12 +802,85 @@ studio.internal = (function(proto) {
       });
     }
 
+    // Wake up find() callers waiting for a specific app to appear
+    function notifyFindWaiters(appName) {
+      pendingFindWaiters = pendingFindWaiters.filter(function(waiter) {
+        if (waiter.appName === appName) {
+          waiter.resolve();
+          return false; // remove from list
+        }
+        return true;
+      });
+    }
+
+    // Check if an app is currently connected and announced
+    this.isAppAvailable = function(appName) {
+      return announcedApps.has(appName);
+    };
+
+    // Check if an app was ever seen (used to distinguish "not yet discovered" from "disconnected")
+    this.wasAppSeen = function(appName) {
+      return everSeenApps.has(appName);
+    };
+
+    // Check if client is in direct mode (no proxy protocol)
+    this.isDirectMode = function() {
+      return appConnections.length > 0 && !appConnections[0].supportsProxyProtocol();
+    };
+
+    // Request a structure refresh from the primary connection (direct mode only).
+    // In proxy mode, discovery is push-based via ServicesNotification so this is a no-op.
+    function requestStructureRefresh() {
+      if (appConnections[0] && !appConnections[0].supportsProxyProtocol()) {
+        appConnections[0].makeStructureRequest(0);
+      }
+    }
+
+    // Register a waiter for a specific app name, with timeout
+    this.waitForApp = function(appName, timeoutMs) {
+      // Check if already available
+      if (announcedApps.has(appName)) {
+        return Promise.resolve();
+      }
+
+      // In direct mode, ask the server now to trigger immediate discovery.
+      // After this, the server will push eStructureChangeResponse (id 0)
+      // when siblings start/stop.
+      requestStructureRefresh();
+
+      return new Promise(function(resolve, reject) {
+        var waiter = { appName: appName };
+        var timer = timeoutMs > 0 ? setTimeout(function() {
+          pendingFindWaiters = pendingFindWaiters.filter(function(w) { return w !== waiter; });
+          reject(new Error(appName + " not found within " + timeoutMs + "ms"));
+        }, timeoutMs) : null;
+        waiter.resolve = function() { clearTimeout(timer); resolve(); };
+        waiter.reject = function(err) { clearTimeout(timer); reject(err); };
+        pendingFindWaiters.push(waiter);
+      });
+    };
+
+    // Announce an app as ADD (first time) or RECONNECT (seen before).
+    // No-op if already announced or not a valid application node.
+    function announceApp(appName, node) {
+      if (announcedApps.has(appName)) return;
+      if (!everSeenApps.has(appName) && (!node || !isApplicationNode(node))) return;
+      var change = everSeenApps.has(appName) ? obj.structure.RECONNECT : obj.structure.ADD;
+      announcedApps.add(appName);
+      everSeenApps.add(appName);
+      notifyStructure(appName, change);
+      notifyFindWaiters(appName);
+    }
+
+    function unannounceApp(appName) {
+      if (!announcedApps.has(appName)) return;
+      announcedApps.delete(appName);
+      notifyStructure(appName, obj.structure.REMOVE);
+    }
+
     function notifyApplications(connection) {
       connection.root().forEachChild(function (node) {
-        if (isApplicationNode(node) && !announcedApps.has(node.name())) {
-          announcedApps.add(node.name());
-          notifyStructure(node.name(), obj.structure.ADD);
-        }
+        announceApp(node.name(), node);
       });
     }
 
@@ -741,19 +888,30 @@ studio.internal = (function(proto) {
       var sys = connection.root();
       sys.async.onDone(function (system) {
         notifyApplications(connection);
-        // Subscribe to structure changes to propagate app ADD/REMOVE at runtime
-        system.async.subscribeToStructure(function(appName, change) {
-          var node = system.child(appName);
-          if (change === obj.structure.ADD && node && isApplicationNode(node)) {
-            if (!announcedApps.has(appName)) {
-              announcedApps.add(appName);
-              notifyStructure(appName, obj.structure.ADD);
+
+        var primaryConn = appConnections[0];
+        var isProxyMode = primaryConn && primaryConn.supportsProxyProtocol();
+
+        if (isProxyMode) {
+          // Proxy mode: only handle REMOVE here. ADD/RECONNECT is deferred to
+          // notifyApplications() after the proxy tunnel connects (via
+          // tryConnectPendingSiblings → connectViaProxy), ensuring the sibling
+          // is actually reachable before announcing it.
+          system.async.subscribeToStructure(function(appName, change) {
+            if (change === obj.structure.REMOVE) {
+              unannounceApp(appName);
             }
-          } else if (change === obj.structure.REMOVE && announcedApps.has(appName)) {
-            announcedApps.delete(appName);
-            notifyStructure(appName, obj.structure.REMOVE);
-          }
-        });
+          });
+        } else {
+          // Direct mode: each connection owns its local app.
+          // Connection lifecycle directly maps to app lifecycle.
+          system.forEachChild(function(app) {
+            if (isApplicationNode(app)) {
+              connectionLocalApps.set(connection, app.name());
+            }
+          });
+        }
+
         resolve(system);
       }, reject, sys);
     }
@@ -762,6 +920,24 @@ studio.internal = (function(proto) {
       return new Promise(function (resolve, reject) {
         var appConnection = new obj.AppConnection(url, notificationListener, autoConnect);
         appConnections.push(appConnection);
+
+        // Direct mode lifecycle: connection close → REMOVE, reconnect → RECONNECT
+        appConnection.onDisconnected = function() {
+          var localApp = connectionLocalApps.get(appConnection);
+          if (localApp) unannounceApp(localApp);
+        };
+        appConnection.onReconnected = function() {
+          if (!connectionLocalApps.has(appConnection)) {
+            // Initial registration may have timed out — populate now
+            appConnection.root().forEachChild(function(app) {
+              if (isApplicationNode(app)) {
+                connectionLocalApps.set(appConnection, app.name());
+              }
+            });
+          }
+          notifyApplications(appConnection);
+        };
+
         appConnection.onServiceConnectionEstablished = function(serviceConnection, instanceKey) {
           serviceConnection.instanceKey = instanceKey;
           appConnections.push(serviceConnection);
@@ -774,9 +950,8 @@ studio.internal = (function(proto) {
               connectedSiblings.delete(con.siblingKey);
             }
             con.root().forEachChild(function(node) {
-              if (isApplicationNode(node) && announcedApps.has(node.name())) {
-                announcedApps.delete(node.name());
-                notifyStructure(node.name(), obj.structure.REMOVE);
+              if (isApplicationNode(node)) {
+                unannounceApp(node.name());
               }
             });
             if (closedByUser) {
@@ -816,6 +991,10 @@ studio.internal = (function(proto) {
     }
 
 	    this.onConnect = function(resolve, reject, autoConnect) {
+	      if (isClosed) {
+	        reject(new Error("Client has been closed"));
+	        return;
+	      }
 	      if (connected) {
 	        resolve(this_);
 	        return;
@@ -841,17 +1020,38 @@ studio.internal = (function(proto) {
           system.forEachChild(function (app) {
             if (!app.info().isLocal)
             {
-              var appUrl = app.info().serverAddr + ":" + app.info().serverPort;
+              var appUrl = appAddress(app.info());
               promises.push(this_.onAppConnect(appUrl, notificationListener, autoConnect));
             }
           });
+          // Watch primary connection's structure for new siblings (direct mode)
+          system.async.subscribeToStructure(function(appName, change) {
+            if (change === obj.structure.ADD) {
+              var app = system.child(appName);
+              if (app && app.info() && !app.info().isLocal) {
+                // New sibling discovered — check we don't already have a connection
+                var alreadyConnected = Array.from(connectionLocalApps.values()).indexOf(appName) >= 0;
+                if (!alreadyConnected) {
+                  var appUrl = appAddress(app.info());
+                  this_.onAppConnect(appUrl, notificationListener, autoConnect).catch(function(err) {
+                    console.error("Failed to connect to sibling " + appName + ":", err);
+                  });
+                }
+              }
+            }
+          });
+          // Direct mode discovery: waitForApp() and subscribeToStructure()
+          // trigger structure refreshes on demand.
         } else {
           system.forEachChild(function (app) {
             if (!app.info().isLocal) {
-              knownSiblings.add(app.info().serverAddr + ':' + app.info().serverPort);
+              knownSiblings.add(appAddress(app.info()));
             }
           });
 
+          // Separate from registerConnection's structure subscription (which handles
+          // user-facing app lifecycle via announceApp/unannounceApp). This one manages
+          // proxy connection establishment when new siblings appear.
           system.async.subscribeToStructure(function(appName, change) {
             if (change === obj.structure.ADD) {
               var app = system.child(appName);
@@ -859,7 +1059,7 @@ studio.internal = (function(proto) {
               if (app && appInfo) {
                 if (!appInfo.isLocal) {
                   // Remote sibling - track for proxy connection
-                  knownSiblings.add(appInfo.serverAddr + ':' + appInfo.serverPort);
+                  knownSiblings.add(appAddress(appInfo));
                   tryConnectPendingSiblings(primaryConnection);
                 } else {
                   // Local sibling came back - re-fetch and resubscribe through primary connection
@@ -874,7 +1074,7 @@ studio.internal = (function(proto) {
             system.forEachChild(function (app) {
               var appInfo = app.info();
               if (appInfo && !appInfo.isLocal) {
-                knownSiblings.add(appInfo.serverAddr + ':' + appInfo.serverPort);
+                knownSiblings.add(appAddress(appInfo));
               }
             });
             tryConnectPendingSiblings(primaryConnection);
@@ -1006,6 +1206,10 @@ studio.internal = (function(proto) {
       // Only fire callbacks for NEW nodes, not existing ones.
       // Use forEachChild() to iterate existing children.
       structureSubscriptions.push(structureConsumer);
+      // Trigger an initial structure refresh to discover current state.
+      // After this, the server pushes eStructureChangeResponse (id 0)
+      // when siblings start/stop.
+      requestStructureRefresh();
     };
 
     this.async.unsubscribeFromStructure = function(structureConsumer) {
@@ -1045,6 +1249,7 @@ studio.internal = (function(proto) {
      * Close all connections managed by this system node.
      */
 	    this.close = function() {
+	      isClosed = true;
 	      connectGeneration++;
 	      var err = new Error('Connection closed');
 	      pendingConnects.forEach(function(con) {
@@ -1068,6 +1273,14 @@ studio.internal = (function(proto) {
 	      knownSiblings.clear();
 	      connectedSiblings.clear();
 	      announcedApps.clear();
+	      everSeenApps.clear();
+	      connectionLocalApps.clear();
+	      // Reject all pending find waiters
+	      pendingFindWaiters.forEach(function(waiter) {
+	        waiter.reject(new Error("Client closed"));
+	      });
+	      pendingFindWaiters = [];
+	      structureSubscriptions = [];
 	    };
 
   };
@@ -1136,7 +1349,14 @@ studio.internal = (function(proto) {
     var reconnectTimeoutId = null;
     var currentMetadata = null;
     var closedIntentionally = false;  // Set by close() to prevent reconnection
-    var SERVICES_TIMEOUT_MS = 150000; // 120s resend interval + 30s buffer
+    var hasNotifiedDisconnect = false; // Guard for onDisconnected lifecycle callback
+    var hasConnectedBefore = false; // Distinguishes initial connect from reconnect
+    var SERVICES_TIMEOUT_MS = (INACTIVITY_RESEND_INTERVAL_S + 30) * 1000;
+    var reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+    var lastServerMessageTime = 0; // for stall detection
+    var stallCheckIntervalId = null;
+    var STALL_CHECK_INTERVAL_MS = 15000; // check every 15s
+    var STALL_TIMEOUT_MS = (INACTIVITY_RESEND_INTERVAL_S + 30) * 1000; // must exceed inactivityResendInterval
     nodeMap.set(systemNode.id(), systemNode);
     handler.onContainer = handleIncomingContainer;
     this.resubscribe = function(item) {
@@ -1175,20 +1395,26 @@ studio.internal = (function(proto) {
     var CONNECT_TIMEOUT_MS = 30000; // 30 second timeout for connect calls
     var PROXY_MIN_COMPAT_VERSION = proto.PROXY_MIN_COMPAT_VERSION; // From protocol namespace
 
-    // Helper to schedule reconnection - avoids duplicate code in onError and onClosed
+    // Helper to schedule reconnection with exponential backoff
     function scheduleReconnect(logMessage) {
       if (!autoConnect || !isPrimaryConnection || reconnectTimeoutId) return;
+      var delay = reconnectDelayMs;
+      // Add jitter (±20%) to prevent thundering herd
+      var jitter = delay * 0.2 * (2 * Math.random() - 1);
+      delay = Math.round(delay + jitter);
       reconnectTimeoutId = setTimeout(function() {
         reconnectTimeoutId = null;
         if (!socketTransport) return;
         // Ensure proxy state is cleaned up (may already be done by onClosed, but
         // onError can fire without onClose in Node.js — idempotent if already clean)
         cleanupPrimaryConnectionState();
-        console.log(logMessage);
+        console.log(logMessage + " (backoff: " + delay + "ms)");
         socketTransport.reconnect(appUrl, proto.BINARY_TYPE);
         handler = new proto.Handler(socketTransport, notificationListener);
         handler.onContainer = handleIncomingContainer;
-      }, 3000);
+      }, delay);
+      // Exponential backoff: double up to 30s max
+      reconnectDelayMs = Math.min(reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS);
     }
 
     function removeServiceConnection(instanceKey, closedByUser) {
@@ -1321,6 +1547,37 @@ studio.internal = (function(proto) {
       servicesTimeoutId = null;
     }
 
+    // Stall detection: force-close socket if no server messages for STALL_TIMEOUT_MS
+    // while there are active subscriptions expecting data. Without subscriptions,
+    // silence is expected and not a stall.
+    function hasAnyActiveSubscriptions() {
+      for (var node of nodeMap.values()) {
+        if (node.hasSubscriptions()) return true;
+      }
+      return false;
+    }
+
+    // Stall detection runs only on the primary connection. In direct mode, sibling
+    // stalls are detected via REMOVE events when the primary's structure updates.
+    // In proxy mode, sibling traffic flows through the primary, so one timer covers all.
+    function startStallDetection() {
+      if (stallCheckIntervalId || !isPrimaryConnection) return;
+      lastServerMessageTime = Date.now();
+      stallCheckIntervalId = setInterval(function() {
+        if (lastServerMessageTime > 0 && hasAnyActiveSubscriptions() &&
+            Date.now() - lastServerMessageTime > STALL_TIMEOUT_MS) {
+          console.log("Connection stalled: no server messages for " + STALL_TIMEOUT_MS + "ms with active subscriptions, forcing reconnect");
+          lastServerMessageTime = 0; // prevent repeated fires
+          socketTransport.close();
+        }
+      }, STALL_CHECK_INTERVAL_MS);
+    }
+
+    function stopStallDetection() {
+      clearInterval(stallCheckIntervalId);
+      stallCheckIntervalId = null;
+    }
+
     function cleanupPrimaryConnectionState() {
       if (!isPrimaryConnection) return;
       // Notify service instances of disconnect
@@ -1336,6 +1593,7 @@ studio.internal = (function(proto) {
       availableServices.clear();
       currentMetadata = null;
       requests = [];
+      stopStallDetection();
     }
 
     this.onServicesReceived = function(services, metadata) {
@@ -1419,7 +1677,6 @@ studio.internal = (function(proto) {
       if (existingConnection) {
         // Reconnect existing transport with new service instance — preserves nodes and callbacks
         proxyConnection = existingConnection;
-        proxyConnection.serviceId = newServiceId;
         var transport = proxyConnection._getTransport();
         // Set onopen to trigger handler recreation + resubscribe (the original onopen
         // was overwritten by the first connectViaProxy call's new-connection handler)
@@ -1436,7 +1693,6 @@ studio.internal = (function(proto) {
         proxyConnection = new obj.AppConnection(result.transport, notificationListener, autoConnect);
         proxyConnection.instanceKey = result.instanceKey;
         proxyConnection.siblingKey = addr + ':' + port;
-        proxyConnection.serviceId = newServiceId;
         serviceConnections.set(result.instanceKey, proxyConnection);
       }
 
@@ -1502,7 +1758,7 @@ studio.internal = (function(proto) {
     this.sendServiceMessage = function(serviceId, instanceId, kind, payload) {
       var serviceMessage = proto.ServiceMessage.create({
         serviceId: serviceId,
-        instanceId: instanceId || 0,
+        instanceId: instanceId,
         kind: kind
       });
       if (payload) {
@@ -1517,6 +1773,8 @@ studio.internal = (function(proto) {
     // Returns true if proxy protocol is supported (compat >= PROXY_MIN_COMPAT_VERSION)
     // When true, backends are accessed via ServiceMessage tunneling, not direct connections
     this.supportsProxyProtocol = function() {
+      if (typeof process !== 'undefined' && process.env && process.env.CDP_FORCE_DIRECT_MODE === '1')
+        return false;
       return currentMetadata && currentMetadata.compatVersion >= PROXY_MIN_COMPAT_VERSION;
     };
 
@@ -1531,10 +1789,22 @@ studio.internal = (function(proto) {
       // Clear any pending reconnect timeout since we're now connected
       clearTimeout(reconnectTimeoutId);
       reconnectTimeoutId = null;
+      reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+      hasNotifiedDisconnect = false; // Reset disconnect guard for next cycle
+      startStallDetection();
       // Note: For proxy connections, connectViaProxy overwrites transport.onopen
       // with _triggerReconnect(), so this handler only fires for the primary connection.
       // Primary handler recreation happens in scheduleReconnect before reconnect().
       appConnection.resubscribe(systemNode);
+      // Notify lifecycle callback after structure refetch completes (not on initial connect)
+      if (hasConnectedBefore && appConnection.onReconnected) {
+        systemNode.async.onDone(function() {
+          appConnection.onReconnected();
+        }, function(err) {
+          console.error("Structure refetch failed on reconnect:", err);
+        }, systemNode);
+      }
+      hasConnectedBefore = true;
     };
     onClosed = function (event) {
       if (closedIntentionally) return;
@@ -1571,6 +1841,12 @@ studio.internal = (function(proto) {
         reason = "Unknown reason";
 
       console.log("Socket close: " + reason);
+
+      // Notify lifecycle callback once per disconnect (not on each reconnection attempt)
+      if (!hasNotifiedDisconnect && appConnection.onDisconnected) {
+        hasNotifiedDisconnect = true;
+        appConnection.onDisconnected();
+      }
 
       clearServicesTimeout();
       clearTimeout(reconnectTimeoutId);
@@ -1638,6 +1914,8 @@ studio.internal = (function(proto) {
       }
       if (stop) {
         request.stop = stop;
+      } else {
+        request.inactivityResendInterval = INACTIVITY_RESEND_INTERVAL_S;
       }
       msg.messageType = proto.ContainerType.eGetterRequest;
       msg.getterRequest = [request];
@@ -1650,6 +1928,8 @@ studio.internal = (function(proto) {
       request.nodeId = id;
       if (stop) {
         request.stop = stop;
+      } else {
+        request.inactivityResendInterval = INACTIVITY_RESEND_INTERVAL_S;
       }
       if (startingFrom != undefined) {
         request.startingFrom = startingFrom;
@@ -1847,6 +2127,7 @@ studio.internal = (function(proto) {
     }
 
     function handleIncomingContainer(protoContainer, metadata) {
+      lastServerMessageTime = Date.now(); // Update stall detection timestamp
       // Set currentMetadata from Hello message immediately (not just on ServicesNotification)
       // This ensures supportsProxyProtocol() works before ServicesNotification arrives
       if (!currentMetadata && metadata) {
@@ -1942,6 +2223,8 @@ studio.internal = (function(proto) {
  */
 studio.api = (function(internal) {
   var obj = {};
+  // No default timeout — find() waits indefinitely for the app to appear.
+  // Use { timeout: 30000 } for explicit timeout, { timeout: 0 } for immediate fail.
 
   /**
    * Creates an instance of INode
@@ -2118,7 +2401,7 @@ studio.api = (function(internal) {
      *
      * @callback structureConsumer
      * @param {string} node name
-     * @param {number} REMOVE 0/ADD 1 from studio.api.structure.ADD / studio.api.structure.REMOVE
+     * @param {number} change - ADD (1), REMOVE (0), or RECONNECT (2) from studio.api.structure
      */
 
     /**
@@ -2263,7 +2546,7 @@ studio.api = (function(internal) {
       var nodes = {};
 
       function f(promise, nodeName, index, arr) {
-        var path = arr.slice(0,index+1);
+        var path = arr.slice(0,index+1).join('.');
         if (memoize[path] && !nodes[path])
           return memoize[path];
         else if (memoize[path] && nodes[path] && nodes[path].isValid())
@@ -2284,8 +2567,7 @@ studio.api = (function(internal) {
       // Invalidate cache entries for a specific app name (called on structure changes)
       f.invalidateApp = function(appName) {
         Object.keys(memoize).forEach(function(key) {
-          // Key is array converted to string, e.g. "App2" or "App2,CPULoad"
-          if (key === appName || key.startsWith(appName + ',')) {
+          if (key === appName || key.startsWith(appName + '.')) {
             delete memoize[key];
             delete nodes[key];
           }
@@ -2297,14 +2579,49 @@ studio.api = (function(internal) {
     var findNode = findNodeCache;
     findNodeCacheInvalidator = findNodeCache.invalidateApp;
     /**
-     * Request node with provided path.
+     * Request node with provided path. Waits indefinitely for the target app
+     * to appear if it is not yet available.
      *
-     * @param nodePath Should contain dot separated path to target node. Note: root node is not considered part of the path.
+     * @param nodePath Dot-separated path to target node (e.g. 'App2.CPULoad').
+     * @param options Optional. { timeout: milliseconds } to limit wait time.
+     *   Use { timeout: 0 } to fail immediately if the app is not available.
      * @returns {Promise.<INode>} A promise containing requested node when fulfilled.
      */
-    this.find = function(nodePath) {
-      var nodes = nodePath.split(".");
-      return nodes.reduce(findNode, this.root());
+    this.find = function(nodePath, options) {
+      if (!nodePath) {
+        return Promise.reject("Child not found: ");
+      }
+      var pathParts = nodePath.split(".");
+      var appName = pathParts[0];
+      var self = this;
+
+      function doFind() {
+        // In direct mode, reject if the app was previously connected but is now
+        // disconnected. This prevents returning stale nodes whose connection is down.
+        // In proxy mode, the node tree is maintained by the primary connection so
+        // stale access is not an issue — the primary connection handles structure.
+        if (system.isDirectMode() && system.wasAppSeen(appName) && !system.isAppAvailable(appName)) {
+          return Promise.reject(appName + " is not available");
+        }
+        return pathParts.reduce(findNode, self.root());
+      }
+
+      // timeout: 0 means immediate fail (old behavior)
+      if (options && options.timeout === 0) {
+        return doFind();
+      }
+
+      // timeout > 0 means wait up to that many ms; no timeout means wait indefinitely
+      var timeoutMs = (options && options.timeout > 0) ? options.timeout : 0;
+
+      // Trigger connection before waiting — prevents deadlock when find()
+      // is called without a prior root() call. Surface connection errors
+      // to the caller instead of swallowing them.
+      return self.root().then(function() {
+        return system.waitForApp(appName, timeoutMs);
+      }).then(function() {
+        return doFind();
+      });
     };
 
     this._getAppConnections = function() {
