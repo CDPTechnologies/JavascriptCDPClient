@@ -66,14 +66,17 @@ Benefits
 Structure Events
 ----------------
 
-On the root node, ``subscribeToStructure`` tracks application lifecycle with three event types:
+On the root node, ``subscribeToStructure`` tracks application lifecycle:
 
 - ``studio.api.structure.ADD`` (1) — An application appeared for the first time
-- ``studio.api.structure.REMOVE`` (0) — An application went offline
+- ``studio.api.structure.DISCONNECT`` (3) — An application went offline (may reconnect)
 - ``studio.api.structure.RECONNECT`` (2) — An application restarted (was seen before, went offline, came back)
 
-On other nodes, ADD and REMOVE fire when children are added or removed at runtime.
-RECONNECT only fires at the root level.
+On other nodes, ``subscribeToStructure`` fires when children are added or removed
+(e.g. components or operators added to a running application):
+
+- ``studio.api.structure.ADD`` (1) — A child node was added
+- ``studio.api.structure.REMOVE`` (0) — A child node was removed
 
 When an app restarts, the client automatically restores value and event subscriptions,
 so user code does not need to re-subscribe. RECONNECT is informational — use it for
@@ -89,7 +92,7 @@ logging or UI updates.
                 node.subscribeToValues(v => console.log(`[${appName}] CPULoad: ${v}`));
               }).catch(err => console.error(`Failed to find ${appName}.CPULoad:`, err));
             }
-            if (change === studio.api.structure.REMOVE) {
+            if (change === studio.api.structure.DISCONNECT) {
               console.log(`App offline: ${appName}`);
             }
             if (change === studio.api.structure.RECONNECT) {
@@ -656,9 +659,10 @@ node.subscribeToStructure(structureConsumer)
 
 - Usage
 
-    Subscribe to structure changes on this node. Each time a child is added or removed,
-    structureConsumer is called with the child name and change (ADD == 1, REMOVE == 0).
-    On the root node, RECONNECT (2) fires when a previously-seen application restarts.
+    Subscribe to structure changes on this node.
+    On the root node: ADD (1) when an app appears, DISCONNECT (3) when it goes offline,
+    RECONNECT (2) when it restarts. On other nodes: ADD (1) when a child is added,
+    REMOVE (0) when a child is removed.
 
 node.unsubscribeFromStructure(structureConsumer)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

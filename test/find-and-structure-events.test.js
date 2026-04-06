@@ -1,25 +1,26 @@
 /**
- * find() wait semantics and RECONNECT structure event tests
+ * find() wait semantics and structure event constant tests
  *
- * Unit tests for the new public API surfaces. Tests that require
+ * Unit tests for the public API surfaces. Tests that require
  * a live connection (find() timeout behavior, subscribeToStructure
- * RECONNECT events) are covered by the component tests in the
+ * lifecycle events) are covered by the component tests in the
  * parent cdp monorepo.
  */
 
 global.WebSocket = require('ws');
 const studio = require('../index');
 
-describe('RECONNECT structure constant', () => {
-  test('studio.api.structure has ADD, REMOVE, and RECONNECT with correct values', () => {
+describe('structure event constants', () => {
+  test('studio.api.structure has ADD, REMOVE, RECONNECT, and DISCONNECT with correct values', () => {
     expect(studio.api.structure.ADD).toBe(1);
     expect(studio.api.structure.REMOVE).toBe(0);
     expect(studio.api.structure.RECONNECT).toBe(2);
+    expect(studio.api.structure.DISCONNECT).toBe(3);
   });
 
-  test('RECONNECT is distinct from ADD and REMOVE', () => {
-    const values = [studio.api.structure.ADD, studio.api.structure.REMOVE, studio.api.structure.RECONNECT];
-    expect(new Set(values).size).toBe(3);
+  test('all structure constants are distinct', () => {
+    const values = [studio.api.structure.ADD, studio.api.structure.REMOVE, studio.api.structure.RECONNECT, studio.api.structure.DISCONNECT];
+    expect(new Set(values).size).toBe(4);
   });
 });
 
