@@ -1,16 +1,22 @@
 // Environment detection and dependency loading
-let root;               // protobuf definitions
 let WS;                 // WebSocket constructor
+let root;               // protobuf root namespace
 
 if (typeof window === 'undefined') {
   // ---- Node / CommonJS ----
-  root = require('./generated/containerPb.js');
-  WS   = global.WebSocket || require('ws');
+  WS = global.WebSocket || require('ws');
   global.WebSocket = WS;              // make sure anything else sees it
+  var protobuf = require('protobufjs');
+  root = protobuf.parse(require('./variant.proto.js')).root;
+  protobuf.parse(require('./database.proto.js'), root);
+  protobuf.parse(require('./container.proto.js'), root);
 } else {
   // ---- Browser ----
-  root = window.root;                // injected by <script src="containerPb.js">
-  WS   = window.WebSocket;
+  WS = window.WebSocket;
+  var protobuf = window.protobuf;
+  root = protobuf.parse(window.variantProto).root;
+  protobuf.parse(window.databaseProto, root);
+  protobuf.parse(window.containerProto, root);
 }
 
 const Container = root.DBMessaging.Protobuf.Container;
@@ -44,20 +50,15 @@ class Client {
   /**
    * Create a new Client instance to communicate with the logger.
    *
-   * @param {string} endpoint - The logger endpoint (e.g. "127.0.0.1:17000" or "ws://127.0.0.1:17000").
+   * @param {string|object} endpointOrTransport - The logger endpoint (e.g. "127.0.0.1:17000")
+   *   or a service transport object with send/close/onopen/onmessage/onclose/onerror.
    * @param {boolean} [autoReconnect=true] - Whether to automatically reconnect if the connection is lost.
+   *   Forced to false when a transport object is provided.
    */
-  constructor(endpoint, autoReconnect = true) {
-    // If endpoint does not start with "ws://" or "wss://", prepend "ws://"
-    let url = endpoint;
-    if (!/^wss?:\/\//.test(url)) {
-      url = `ws://${url}`;
-    }
-
+  constructor(endpointOrTransport, autoReconnect = true) {
     this.reqId = -1;
-    this.autoReconnect = autoReconnect;
     this.enableTimeSync = true; // Time synchronization is enabled by default.
-
+    this.disconnected = false;
     this.isOpen = false;
     this.queuedRequests = {};
     this.storedPromises = {};
@@ -78,8 +79,25 @@ class Client {
     this.senderTags = {};           // Cache for event sender tags (keyed by sender)
     this.pendingSenderTags = {};    // Holds pending promises for sender tags
 
-    // Create the WebSocket connection
-    this.ws = this._connect(url);
+    if (typeof endpointOrTransport === 'object' && typeof endpointOrTransport.send === 'function') {
+      // Service transport mode — tunnel through StudioAPI proxy
+      this.autoReconnect = false;
+      var self = this;
+      var transport = endpointOrTransport;
+      transport.onopen = function() { self._onOpen(transport); };
+      transport.onmessage = function(event) { self._handleMessage(transport, event.data); };
+      transport.onerror = function(error) { self._onError(transport, error); };
+      transport.onclose = function() { self._onClose(transport); };
+      this.ws = transport;
+    } else {
+      // Endpoint string mode — direct WebSocket connection
+      this.autoReconnect = autoReconnect;
+      var url = endpointOrTransport;
+      if (!/^wss?:\/\//.test(url)) {
+        url = 'ws://' + url;
+      }
+      this.ws = this._connect(url);
+    }
   }
 
 
@@ -115,6 +133,7 @@ class Client {
    */
   disconnect() {
     this.autoReconnect = false;
+    this.disconnected = true;
     this._cleanupQueuedRequests();
     this.isOpen = false;
     if (this.ws) {
@@ -150,7 +169,16 @@ class Client {
    *   (e.g., "4.5.2"). If the version is below 3.0, the promise is rejected with
    *   an error indicating an incompatible version.
    */
+  _rejectIfDisconnected() {
+    if (this.disconnected) {
+      return Promise.reject(new Error("Client is disconnected"));
+    }
+    return null;
+  }
+
   requestApiVersion() {
+    const rejected = this._rejectIfDisconnected();
+    if (rejected) return rejected;
     this._timeRequest();
     const requestId = this._getRequestId();
     if (!this.isOpen) {
@@ -179,6 +207,8 @@ class Client {
    *       node metadata
    */
   requestLoggedNodes() {
+    const rejected = this._rejectIfDisconnected();
+    if (rejected) return rejected;
     this._timeRequest();
     const requestId = this._getRequestId();
     if (!this.isOpen) {
@@ -203,6 +233,8 @@ class Client {
    *   - `endS`   (number): The latest available timestamp (in seconds).
    */
   requestLogLimits() {
+    const rejected = this._rejectIfDisconnected();
+    if (rejected) return rejected;
     this._timeRequest();
     const requestId = this._getRequestId();
     if (!this.isOpen) {
@@ -241,6 +273,8 @@ class Client {
    *       at that timestamp.
    */
   requestDataPoints(nodeNames, startS, endS, noOfDataPoints, limit) {
+    const rejected = this._rejectIfDisconnected();
+    if (rejected) return rejected;
     this._timeRequest();
     const requestId = this._getRequestId();
     const promise = new Promise((resolve, reject) => {
@@ -315,6 +349,8 @@ class Client {
    */
   // Modified requestEvents() to wait for missing sender tag info.
   requestEvents(query) {
+    const rejected = this._rejectIfDisconnected();
+    if (rejected) return rejected;
     this._timeRequest();
     const requestId = this._getRequestId();
     const eventQuery = this._buildEventQuery(query);
@@ -359,6 +395,8 @@ class Client {
    * @returns {Promise<number>} A promise that resolves with the count of events.
    */
   countEvents(query) {
+    const rejected = this._rejectIfDisconnected();
+    if (rejected) return rejected;
     this._timeRequest();
     const requestId = this._getRequestId();
     const eventQuery = this._buildEventQuery(query);
@@ -464,6 +502,8 @@ class Client {
    * @returns {Promise<Object>} A promise that resolves with an object representing the tags for the sender.
    */
   getSenderTags(sender) {
+    const rejected = this._rejectIfDisconnected();
+    if (rejected) return rejected;
     if (this.senderTags && this.senderTags[sender]) {
       return Promise.resolve(this.senderTags[sender]);
     }
@@ -521,6 +561,7 @@ class Client {
   _onClose(ws) {
     this.isOpen = false;
     if (!this.autoReconnect) {
+      this.disconnected = true;
       this._onError(ws, new Error("Connection was closed"));
     } else {
       // Try to reconnect after a delay
@@ -790,6 +831,8 @@ class Client {
         this._sendApiVersionRequest(requestId);
       } else if (req && req.type === "events") {
         this._sendEventsRequest(requestId, req.query);
+      } else if (req && req.type === "countEvents") {
+        this._sendCountEventsRequest(requestId, req.query);
       }
     }
     this.queuedRequests = {};

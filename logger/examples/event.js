@@ -1,70 +1,38 @@
-// event.js
-// An example script to see filtered events
+// event.js — Query events via service discovery
+//
+// Usage: node event.js [host:port]
+// Default connects to 127.0.0.1:7689
 
-const cdplogger = require('../client');
+var studio = require('../../index.js');
+var EventQueryFlags = studio.logger.Client.EventQueryFlags;
 
-const { EventQueryFlags, MatchType } = cdplogger.Client;
+var address = process.argv[2] || '127.0.0.1:7689';
+var client = new studio.api.Client(address);
 
-
-async function main() {
-  const client = new cdplogger.Client('127.0.0.1:17000', true);
-  
-  try {
-    console.log("Waiting for connection to establish...");
-    // Wait a bit to allow the connection to be established
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    // Build the query with a limit and offset
-    const query = {
-      senderConditions: [{
-        value: "CDPLoggerDemoApp.InvalidLicense",
-        matchType: MatchType.Exact
-      }],
-      dataConditions: {
-        Text: ["Invalid*"], // Wildcard is the default
-        // Multiple data conditions can be specified
-      },
-      limit: 100,
-      offset: 0,
-      flags: EventQueryFlags.NewestFirst | EventQueryFlags.UseLogStampForTimeRange
-    };
-
-    console.log("Counting matching events...");
-    const totalCount = await client.countEvents(query);
-    console.log(`Total matching events count: ${totalCount}`);
-    
-    console.log("Sending event query...");
-    console.log("Query:", JSON.stringify(query, null, 2));
-    
-    const events = await client.requestEvents(query);
-    console.log(`Received ${events.length} events`);
-    
-    if (events.length > 0) {
-      console.log('\nEvents:');
-      events.forEach(event => {
-        // If event.data is a string, parse it; otherwise assume it's already an object.
-        const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
-        console.log(JSON.stringify({
-          timestamp: event.timestampSec,
-          sender: event.sender,
-          data: data,
-          // The event tags will be attached (or requested if not yet available)
-          tags: event.tags
-        }, null, 2));
-      });
-    }
-
-  } catch (error) {
-    console.error('Error:', error);
-    console.error('Stack:', error.stack);
-  } finally {
-    console.log("Disconnecting from CDP Logger...");
-    client.disconnect();
-    process.exit(0);
-  }
-}
-
-main().catch(error => {
-  console.error("Unhandled error:", error);
+client.logger().then(function(logger) {
+  return logger.countEvents({}).then(function(count) {
+    console.log('Total events: ' + count);
+    return logger.requestEvents({
+      limit: 20,
+      flags: EventQueryFlags.NewestFirst
+    });
+  }).then(function(events) {
+    console.log('\nLatest ' + events.length + ' events:\n');
+    events.forEach(function(event) {
+      var code = logger.getEventCodeString(event.code);
+      console.log(new Date(event.timestampSec * 1000).toISOString() +
+                  '  [' + (code || event.code) + ']  ' +
+                  event.sender);
+      if (event.data && event.data.Text) {
+        console.log('    ' + event.data.Text);
+      }
+    });
+  });
+}).then(function() {
+  client.close();
+  process.exit(0);
+}).catch(function(err) {
+  console.error('Error:', err);
+  client.close();
   process.exit(1);
 });

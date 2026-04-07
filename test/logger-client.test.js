@@ -1,7 +1,8 @@
 /*global WebSocket*/
 global.WebSocket = require('ws');
-const cdplogger = require('../client');
-const fakeData = require('./fakeData');
+const studio = require('../index');
+const cdplogger = studio.logger;
+const fakeData = require('./loggerFakeData');
 
 describe('ClientTester', () => {
   let client;
@@ -29,16 +30,6 @@ describe('ClientTester', () => {
 
   afterEach(() => {
     client = null;
-  });
-
-  test('test_this', () => {
-    expect(true).toBe(true);
-  });
-
-  test('test_run_event_loop', () => {
-    client.runEventLoop = jest.fn();
-    client.runEventLoop();
-    expect(client.runEventLoop).toHaveBeenCalled();
   });
 
   test('test_disconnect', () => {

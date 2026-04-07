@@ -801,3 +801,170 @@ node.removeChild(name)
 
     Remove child Node from this Node.
 
+Logger Integration (CDP 5.1+)
+-----------------------------
+
+The CDP Logger client is bundled into ``cdp-client`` as ``studio.logger``. Logger
+discovery and connection is handled automatically via the StudioAPI proxy — no need
+to manually discover the logger port or manage a separate WebSocket connection.
+For more information about CDP Logger, see https://cdpstudio.com/manual/cdp/cdplogger/cdplogger-index.html.
+For background on the data query protocol, time synchronization, and API version
+history, see `logger/DOCUMENTATION.md <https://github.com/CDPTechnologies/JavascriptCDPClient/blob/main/logger/DOCUMENTATION.md>`_. Runnable
+examples are in `logger/examples/ <https://github.com/CDPTechnologies/JavascriptCDPClient/tree/main/logger/examples>`_.
+
+Logger data is served behind StudioAPI authentication and tunneled through the
+existing proxy connection.
+
+client.logger(name, options)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+- Arguments
+
+    name (optional) - Logger service name (node path) to filter by, e.g. ``"App.CDPLogger"``
+
+    options (optional) - ``{ timeout: number }`` Timeout in milliseconds. Rejects if no matching service appears in time.
+
+- Returns
+
+    Promise.<LoggerClient> - Resolves with a connected logger client instance.
+
+- Usage
+
+    Returns a logger client for querying historic data and events. The logger
+    is discovered automatically from all applications in the system, including
+    sibling apps connected via proxy. Without a timeout, waits indefinitely
+    until a matching logger appears. Repeated calls return the same instance.
+
+- Example
+
+    .. code:: javascript
+
+        const studio = require("cdp-client");
+        const client = new studio.api.Client("127.0.0.1:7689");
+
+        // Auto-discover any available logger
+        client.logger().then(function(logger) {
+          return logger.requestLogLimits().then(function(limits) {
+            return logger.requestDataPoints(
+              ["Temperature", "Pressure"],
+              limits.startS, limits.endS, 200, 0
+            );
+          }).then(function(points) {
+            points.forEach(function(p) {
+              var temp = p.value["Temperature"];
+              console.log(new Date(p.timestamp * 1000), "min:", temp.min, "max:", temp.max);
+            });
+          });
+        });
+
+    .. code:: javascript
+
+        // Discover a specific logger by name
+        client.logger("App.CDPLogger").then(function(logger) {
+          return logger.requestLoggedNodes().then(function(nodes) {
+            console.log("Logged nodes:", nodes.map(function(n) { return n.name; }));
+          });
+        });
+
+    .. code:: javascript
+
+        // Query events
+        client.logger().then(function(logger) {
+          return logger.requestEvents({
+            limit: 100,
+            flags: studio.logger.Client.EventQueryFlags.NewestFirst
+          }).then(function(events) {
+            events.forEach(function(e) {
+              console.log(e.sender, e.data);
+            });
+          });
+        });
+
+    .. code:: javascript
+
+        // With timeout — rejects if no logger found within 5 seconds
+        client.logger("App.CDPLogger", { timeout: 5000 }).catch(function(err) {
+          console.log(err); // "Timeout: no logger service found for 'App.CDPLogger'"
+        });
+
+client.loggers()
+^^^^^^^^^^^^^^^^
+
+- Returns
+
+    Promise.<Array.<{name, metadata}>> - All available logger services. Waits for
+    service discovery if none have been received yet.
+
+- Usage
+
+    Returns the list of all discovered logger services. Each entry has ``name``
+    (the logger's node path) and ``metadata`` (service metadata including ``proxy_type``).
+
+- Example
+
+    .. code:: javascript
+
+        client.loggers().then(function(loggers) {
+          loggers.forEach(function(l) {
+            console.log(l.name, l.metadata.proxy_type); // "App.CDPLogger" "logserver"
+          });
+        });
+
+studio.logger.Client
+~~~~~~~~~~~~~~~~~~~~
+
+The logger client class is also available as ``studio.logger.Client`` for standalone
+usage when the logger endpoint is already known.
+
+Node.js
+"""""""
+
+In Node.js, the logger client is loaded automatically:
+
+    .. code:: javascript
+
+        const studio = require("cdp-client");
+        var loggerClient = new studio.logger.Client("127.0.0.1:17000");
+
+Browser
+"""""""
+
+In the browser, load the proto files and logger client before ``index.js``:
+
+    .. code:: html
+
+        <script src="protobuf.min.js"></script>
+        <script src="logger/variant.proto.js"></script>
+        <script src="logger/database.proto.js"></script>
+        <script src="logger/container.proto.js"></script>
+        <script src="logger/logger-client.js"></script>
+        <script src="index.js"></script>
+
+Then use via ``studio.logger.Client``:
+
+    .. code:: javascript
+
+        var loggerClient = new studio.logger.Client(window.location.hostname + ":17000");
+
+Static properties:
+
+- ``studio.logger.Client.EventQueryFlags`` - ``{ None: 0, NewestFirst: 1, TimeRangeBeginExclusive: 2, TimeRangeEndExclusive: 4, UseLogStampForTimeRange: 8 }``
+- ``studio.logger.Client.MatchType`` - ``{ Exact: 0, Wildcard: 1 }``
+
+LoggerClient API
+~~~~~~~~~~~~~~~~
+
+The logger client returned by ``client.logger()`` provides these methods:
+
+- ``requestApiVersion()`` - Returns Promise with the logger API version string.
+- ``requestLoggedNodes()`` - Returns Promise with array of ``{ name, routing, tags }`` for each logged signal.
+- ``requestLogLimits()`` - Returns Promise with ``{ startS, endS }`` — the earliest and latest logged timestamps in seconds.
+- ``requestDataPoints(nodeNames, startS, endS, noOfDataPoints, limit)`` - Returns Promise with array of data points. Each point has ``{ timestamp, value }`` where value maps signal names to ``{ min, max, last }``.
+- ``requestEvents(query)`` - Returns Promise with array of events. Query supports ``limit``, ``offset``, ``flags``, ``timeRangeBegin``, ``timeRangeEnd``, ``codeMask``, ``senderConditions``, ``dataConditions``.
+- ``countEvents(query)`` - Returns Promise with the count of matching events.
+- ``getEventCodeDescription(code)`` - Returns human-readable description for an event code (e.g. ``"AlarmSet + SourceObjectUnavailable"``).
+- ``getEventCodeString(code)`` - Returns compact event code string (e.g. ``"RepriseAlarmSet"``, ``"Ack"``).
+- ``getSenderTags(sender)`` - Returns Promise with tags for an event sender.
+- ``disconnect()`` - Closes the connection and disables auto-reconnect.
+- ``setEnableTimeSync(enable)`` - Enable or disable automatic time synchronization with the server.
+
