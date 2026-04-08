@@ -456,7 +456,8 @@ studio.internal = (function(proto) {
   obj.structure  = {
     REMOVE: 0,
     ADD: 1,
-    RECONNECT: 2
+    RECONNECT: 2,
+    DISCONNECT: 3
   };
 
   const STRUCTURE_REQUEST_TIMEOUT_MS = 30000;
@@ -803,7 +804,7 @@ studio.internal = (function(proto) {
 	    var everSeenApps = new Set();
 	    var pendingFindWaiters = []; // for find() waiting on late apps
 	    var pendingFetches = [];
-	    var connectionLocalApps = new Map(); // Maps AppConnection → local app name (direct mode)
+	    var connectionLocalApps = new Map(); // Maps AppConnection → local app name
 	    var this_ = this;
 
     function isApplicationNode(node) {
@@ -907,7 +908,7 @@ studio.internal = (function(proto) {
     function unannounceApp(appName) {
       if (!announcedApps.has(appName)) return;
       announcedApps.delete(appName);
-      notifyStructure(appName, obj.structure.REMOVE);
+      notifyStructure(appName, obj.structure.DISCONNECT);
     }
 
     function notifyApplications(connection) {
@@ -924,22 +925,21 @@ studio.internal = (function(proto) {
         var primaryConn = appConnections[0];
         var isProxyMode = primaryConn && primaryConn.supportsProxyProtocol();
 
+        // Track which app this connection owns (needed for DISCONNECT on connection loss)
+        system.forEachChild(function(app) {
+          if (isApplicationNode(app)) {
+            connectionLocalApps.set(connection, app.name());
+          }
+        });
+
         if (isProxyMode) {
-          // Proxy mode: only handle REMOVE here. ADD/RECONNECT is deferred to
+          // Proxy mode: handle server-side child REMOVE here. ADD/RECONNECT is deferred to
           // notifyApplications() after the proxy tunnel connects (via
           // tryConnectPendingSiblings → connectViaProxy), ensuring the sibling
           // is actually reachable before announcing it.
           system.async.subscribeToStructure(function(appName, change) {
             if (change === obj.structure.REMOVE) {
               unannounceApp(appName);
-            }
-          });
-        } else {
-          // Direct mode: each connection owns its local app.
-          // Connection lifecycle directly maps to app lifecycle.
-          system.forEachChild(function(app) {
-            if (isApplicationNode(app)) {
-              connectionLocalApps.set(connection, app.name());
             }
           });
         }
@@ -953,7 +953,7 @@ studio.internal = (function(proto) {
         var appConnection = new obj.AppConnection(url, notificationListener, autoConnect);
         appConnections.push(appConnection);
 
-        // Direct mode lifecycle: connection close → REMOVE, reconnect → RECONNECT
+        // Direct mode lifecycle: connection close → DISCONNECT, reconnect → RECONNECT
         appConnection.onDisconnected = function() {
           var localApp = connectionLocalApps.get(appConnection);
           if (localApp) unannounceApp(localApp);
@@ -2431,7 +2431,8 @@ studio.api = (function(internal) {
      *
      * @callback structureConsumer
      * @param {string} node name
-     * @param {number} change - ADD (1), REMOVE (0), or RECONNECT (2) from studio.api.structure
+     * @param {number} change - At root level: ADD (1), DISCONNECT (3), or RECONNECT (2).
+     *   At other nodes: ADD (1) or REMOVE (0). See studio.api.structure.
      */
 
     /**
@@ -2547,7 +2548,7 @@ studio.api = (function(internal) {
     var findNodeCacheInvalidator = null;  // Set after findNodeCache is created
 
     var system = new internal.SystemNode(studioURL, notificationListener, function(appName) {
-      // Called on app structure changes (ADD, REMOVE, or RECONNECT)
+      // Called on app structure changes (ADD, DISCONNECT, or RECONNECT)
       findNodeCacheInvalidator(appName);
     });
 
