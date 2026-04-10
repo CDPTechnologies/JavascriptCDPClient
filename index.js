@@ -251,7 +251,7 @@ studio.protocol = (function(ProtoBuf) {
     servicesReq.messageType = obj.ContainerType.eServicesRequest;
     servicesReq.servicesRequest = obj.ServicesRequest.create({
       subscribe: true,
-      inactivityResendInterval: 120
+      inactivityResendInterval: obj.INACTIVITY_RESEND_INTERVAL_S
     });
     return obj.Container.encode(servicesReq).finish();
   };
@@ -261,6 +261,23 @@ studio.protocol = (function(ProtoBuf) {
     if (metadata.compatVersion >= PROXY_MIN_COMPAT_VERSION) {
       socket.send(obj.createServicesRequestBytes());
     }
+  }
+
+  // Send the initial root structure request on a freshly-opened socket.
+  // On resilient servers (compat_version >= 3) populate structure_request
+  // with SYSTEM_NODE_ID — the server treats an empty array with a
+  // request_id as an invalidation ack, so omitting it silently breaks
+  // the root fetch. On legacy servers (compat < 3) preserve the original
+  // empty-structure_request encoding to avoid shipping an unvalidated
+  // wire-format change under older servers.
+  function sendInitialStructureRequest(socket, metadata) {
+    var container = obj.Container.create();
+    container.messageType = obj.ContainerType.eStructureRequest;
+    if (metadata.compatVersion >= studio.protocol.RESILIENCE_MIN_COMPAT_VERSION) {
+      container.structureRequest = [obj.SYSTEM_NODE_ID];
+    }
+    socket._attachRequestId(container, 'structure', obj.SYSTEM_NODE_ID, metadata.compatVersion);
+    socket.send(obj.Container.encode(container).finish());
   }
 
   function ContainerHandler(onContainer, onError, metadata){
@@ -314,9 +331,7 @@ studio.protocol = (function(ProtoBuf) {
 
         if (authResponse.resultCode == obj.AuthResultCode.eGranted)
         {
-          var container = obj.Container.create();
-          container.messageType = obj.ContainerType.eStructureRequest;
-          socket.send(obj.Container.encode(container).finish());
+          sendInitialStructureRequest(socket, metadata);
           sendServicesRequest(socket, metadata);
           resolve(new ContainerHandler(onContainer, onError, metadata));
         } else {
@@ -391,9 +406,7 @@ studio.protocol = (function(ProtoBuf) {
               resolve(authHandler);
             }
             else {
-              var container = obj.Container.create();
-              container.messageType = obj.ContainerType.eStructureRequest;
-              socket.send(obj.Container.encode(container).finish());
+              sendInitialStructureRequest(socket, metadata);
               sendServicesRequest(socket, metadata);
               resolve(new ContainerHandler(onContainer, onError, metadata));
             }
@@ -443,6 +456,8 @@ studio.protocol.SYSTEM_NODE_ID = 0;
 studio.protocol.WS_PREFIX = "ws://";
 studio.protocol.WSS_PREFIX = "wss://";
 studio.protocol.BINARY_TYPE = "arraybuffer";
+studio.protocol.RESILIENCE_MIN_COMPAT_VERSION = 3;
+studio.protocol.INACTIVITY_RESEND_INTERVAL_S = 120;
 
 
 /**
@@ -463,9 +478,32 @@ studio.internal = (function(proto) {
   const STRUCTURE_REQUEST_TIMEOUT_MS = 30000;
   const MAX_RECONNECT_DELAY_MS = 30000;
   const INITIAL_RECONNECT_DELAY_MS = 1000;
-  const INACTIVITY_RESEND_INTERVAL_S = 120;
+  const INACTIVITY_RESEND_INTERVAL_S = proto.INACTIVITY_RESEND_INTERVAL_S;
+  // Network-jitter budget on top of the server's resend interval: the server
+  // sends a value/event/keepalive every INACTIVITY_RESEND_INTERVAL_S; the
+  // client allows up to LIVENESS_GRACE_S of TCP/scheduling jitter on top
+  // before treating the channel as stalled. Sized to fit comfortably under
+  // the connection-wide STALL_TIMEOUT_MS budget (= INACTIVITY + 30s) so the
+  // per-subscription recovery path always fires first.
+  const LIVENESS_GRACE_S = 15;
+  // Per-subscription liveness threshold: if no value/event activity for the
+  // server's resend interval plus the network-jitter grace, the client
+  // considers that channel stalled and triggers a resubscribe.
+  const SUBSCRIPTION_LIVENESS_THRESHOLD_MS = (INACTIVITY_RESEND_INTERVAL_S + LIVENESS_GRACE_S) * 1000;
   const EVENT_HISTORY_WAIT_NS = 120e9; // 120s — accept old events during this window after subscribe
   const EVENT_DEDUP_WINDOW_NS = 30e9;  // 30s — trim entries older than this after history wait
+  const RESILIENCE_MIN_COMPAT_VERSION = proto.RESILIENCE_MIN_COMPAT_VERSION;
+
+  // Iterate a subscription list over a shallow copy so a callback that
+  // unsubscribes another subscriber during dispatch does not skip the
+  // next entry, and a throwing callback does not abort the rest.
+  function dispatchCallbacks(list, label, invoke) {
+    var copy = list.slice();
+    for (var i = 0; i < copy.length; i++) {
+      try { invoke(copy[i]); }
+      catch (e) { console.error(label + " subscription callback threw:", e); }
+    }
+  }
 
   // Helper to remove first matching item from array (shared by AppNode and SystemNode)
   function removeFirst(array, predicate) {
@@ -490,6 +528,13 @@ studio.internal = (function(proto) {
     var hasActiveValueSubscription = false; // track if we've sent a getter request to server
     var lastServerTimestamp = null; // for value dedup after reconnect
     var lastEventTimestamp = 0; // track last received event timestamp for reconnect resume
+    var lastValueActivityMs = 0; // wall-clock of last value receive (or subscribe) for liveness monitoring
+    var lastEventActivityMs = 0; // wall-clock of last event receive (or subscribe) for liveness monitoring
+    // One-shot flags: once an idle subscription has been auto-resubscribed,
+    // the flag stays true to prevent storming. Cleared on natural recovery
+    // (a value/event arrives) or on a fresh user subscribe.
+    var valueResubReported = false;
+    var eventResubReported = false;
 
     this.path = function() {
       var path = "";
@@ -520,8 +565,7 @@ studio.internal = (function(proto) {
       return valid;
     };
 
-    this.invalidate = function() {
-      valid = false;
+    this.rejectPendingFetches = function() {
       givenPromises.forEach(function(promiseHandlers, apiNode) {
         promiseHandlers.forEach(function(promiseHandler) {
           try {
@@ -533,8 +577,84 @@ studio.internal = (function(proto) {
       givenPromises.clear();
     };
 
+    this.invalidate = function() {
+      valid = false;
+      this.rejectPendingFetches();
+    };
+
+    // Reset structureFetched without sending a new structure request.
+    // Used by connectViaProxy on reconnect so onDone waiters block until
+    // the deferred refetch triggered by the new Hello completes.
+    this._markStructureStale = function() {
+      structureFetched = false;
+    };
+
     this.hasSubscriptions = function() {
       return valueSubscriptions.length > 0 || eventSubscriptions.length > 0;
+    };
+
+    this.hasValueSubscriptions = function() {
+      return valueSubscriptions.length > 0;
+    };
+
+    this.hasEventSubscriptions = function() {
+      return eventSubscriptions.length > 0;
+    };
+
+    this._lastValueActivityMs = function() {
+      return lastValueActivityMs;
+    };
+
+    this._lastEventActivityMs = function() {
+      return lastEventActivityMs;
+    };
+
+    // Mark the event subscription healthy without delivering a callback.
+    // Called from parseEventResponse for the server's empty keepalive frames
+    // (id=0, no sender, timestamp=0, no data). The server emits these to
+    // confirm a subscribe and resends them under inactivity_resend_interval
+    // for event subscriptions whose last sent event is still the confirmation
+    // — without this hook, a quiet but healthy subscription would be falsely
+    // resubscribed by checkSubscriptionLiveness.
+    this._noteEventKeepalive = function() {
+      lastEventActivityMs = Date.now();
+      eventResubReported = false;
+    };
+
+    // Resend the current value subscription. Reuses the same fs/sampleRate
+    // computed from valueSubscriptions[]; the server treats this as a fresh
+    // subscription and replies with the current value, restoring liveness.
+    // One-shot: subsequent monitor ticks will not refire until either a
+    // value arrives (natural recovery) or a fresh user subscribe is made.
+    // This prevents a server-side dead subscription from being resubscribed
+    // every threshold cycle.
+    this._resubscribeValues = function() {
+      if (valueSubscriptions.length === 0) return;
+      if (valueResubReported) return;
+      console.log("Value subscription on nodeId=" + id + " idle past "
+          + SUBSCRIPTION_LIVENESS_THRESHOLD_MS + "ms threshold, resubscribing");
+      lastValueActivityMs = Date.now();
+      valueResubReported = true;
+      this.async._makeGetterRequest();
+    };
+
+    // Resend each event subscription with its resume timestamp. Mirrors the
+    // pattern in update() so reconnect-driven and liveness-driven event
+    // resubscriptions go through the same code path. Same one-shot guard
+    // as values.
+    this._resubscribeEvents = function() {
+      if (eventSubscriptions.length === 0) return;
+      if (eventResubReported) return;
+      console.log("Event subscription on nodeId=" + id + " idle past "
+          + SUBSCRIPTION_LIVENESS_THRESHOLD_MS + "ms threshold, resubscribing");
+      lastEventActivityMs = Date.now();
+      eventResubReported = true;
+      for (var i = 0; i < eventSubscriptions.length; i++) {
+        var resumeFrom = lastEventTimestamp > 0
+            ? lastEventTimestamp
+            : eventSubscriptions[i].startingFrom;
+        app.makeEventRequest(id, resumeFrom, false);
+      }
     };
 
     this.info = function() {
@@ -564,6 +684,14 @@ studio.internal = (function(proto) {
       parent = nodeParent;
       lastInfo = protoInfo;
       id = protoInfo.nodeId;
+      // Re-issuing subscriptions from a reconnect / parseChildNode remap is
+      // morally equivalent to a fresh subscribe — clear the one-shot
+      // resubscribe-reported flags so the per-subscription liveness monitor
+      // can fire again if the new connection is also stalled.
+      valueResubReported = false;
+      eventResubReported = false;
+      lastValueActivityMs = Date.now();
+      lastEventActivityMs = Date.now();
       // Keep lastServerTimestamp across reconnect — filters the server's
       // cached last-known-value replay (which has the original timestamp).
       // Per-listener recentEvents preserved across reconnect — the server
@@ -579,15 +707,15 @@ studio.internal = (function(proto) {
 
     this.add = function(node) {
       childMap.set(node.name(), node);
-      for (var i = 0; i < structureSubscriptions.length; i++) {
-        structureSubscriptions[i](node.name(), obj.structure.ADD);
-      }
+      dispatchCallbacks(structureSubscriptions, "Structure", function(cb) {
+        cb(node.name(), obj.structure.ADD);
+      });
     };
 
     this.remove = function(node) {
-      for (var i = 0; i < structureSubscriptions.length; i++) {
-        structureSubscriptions[i](node.name(), obj.structure.REMOVE);
-      }
+      dispatchCallbacks(structureSubscriptions, "Structure", function(cb) {
+        cb(node.name(), obj.structure.REMOVE);
+      });
       node.invalidate();
       childMap.delete(node.name());
     };
@@ -627,10 +755,12 @@ studio.internal = (function(proto) {
           lastServerTimestamp = ts;
         }
       }
+      lastValueActivityMs = Date.now();
+      valueResubReported = false;
       lastValue = nodeValue;
-      for (var i = 0; i < valueSubscriptions.length; i++) {
-        valueSubscriptions[i][0](nodeValue, nodeTimestamp);
-      }
+      dispatchCallbacks(valueSubscriptions, "Value", function(sub) {
+        sub[0](nodeValue, nodeTimestamp);
+      });
     };
 
     this.receiveEvent = function (event) {
@@ -639,19 +769,20 @@ studio.internal = (function(proto) {
       var ts = event.timestamp !== undefined ? Number(event.timestamp) : undefined;
       var eventKey = hasId ? String(event.id) : null;
       var nowNs = hasId ? Date.now() * 1e6 : 0;
+      lastEventActivityMs = Date.now();
+      eventResubReported = false;
       if (ts !== undefined && ts > lastEventTimestamp) lastEventTimestamp = ts;
-      for (var i = 0; i < eventSubscriptions.length; i++) {
-        var sub = eventSubscriptions[i];
+      dispatchCallbacks(eventSubscriptions, "Event", function(sub) {
         if (hasId && ts !== undefined) {
           var isPastHistoryWait = nowNs > sub.dedupStartNs + EVENT_HISTORY_WAIT_NS;
           // Reject events older than lowest tracked timestamp after history wait.
           // When Map is empty (lowestTs 0), any event passes (nothing to compare against).
           var lowestTs = sub.recentEvents.size > 0 ? sub.lowestTs : 0;
-          if (ts < lowestTs && isPastHistoryWait) continue;
+          if (ts < lowestTs && isPastHistoryWait) return;
           // Exact (eventId, timestamp) duplicate check using composite key.
           // Composite key allows multiple timestamps per eventId (recurring alarms).
           var compositeKey = eventKey + ':' + event.timestamp;
-          if (sub.recentEvents.has(compositeKey)) continue;
+          if (sub.recentEvents.has(compositeKey)) return;
           sub.recentEvents.set(compositeKey, ts);
           if (sub.recentEvents.size === 1 || ts < sub.lowestTs) sub.lowestTs = ts;
           // Trim expired entries after history wait. At high event rates, the adaptive
@@ -671,7 +802,7 @@ studio.internal = (function(proto) {
           }
         }
         sub.callback(event);
-      }
+      });
     };
 
     this.async = {};
@@ -694,6 +825,10 @@ studio.internal = (function(proto) {
               var idx = arr.indexOf(entry);
               if (idx >= 0) arr.splice(idx, 1);
               if (arr.length === 0) givenPromises.delete(apiNode);
+              // Drop the matching pending entry so a late server response
+              // can't still satisfy parseStructureResponse's stale-success
+              // guard and mutate the tree after the user saw the timeout.
+              app.dropPendingStructureForNode(id);
               reject(new Error("Structure request timed out after " + STRUCTURE_REQUEST_TIMEOUT_MS + "ms"));
             }
           }, STRUCTURE_REQUEST_TIMEOUT_MS)
@@ -722,6 +857,8 @@ studio.internal = (function(proto) {
     };
 
     this.async.subscribeToValues = function(valueConsumer, fs, sampleRate) {
+      lastValueActivityMs = Date.now();
+      valueResubReported = false;
       valueSubscriptions.push([valueConsumer, fs, sampleRate]);
       this._makeGetterRequest();
     };
@@ -732,6 +869,8 @@ studio.internal = (function(proto) {
     };
 
     this.async.subscribeToEvents = function(eventConsumer, startingFrom) {
+      lastEventActivityMs = Date.now();
+      eventResubReported = false;
       var existing = null;
       for (var si = 0; si < eventSubscriptions.length; si++) {
         if (eventSubscriptions[si].callback === eventConsumer) { existing = eventSubscriptions[si]; break; }
@@ -825,13 +964,8 @@ studio.internal = (function(proto) {
           console.error("onStructureChange callback threw:", e);
         }
       }
-      // Notify user structure subscriptions
-      structureSubscriptions.forEach(function (cb) {
-        try {
-          cb(name, change);
-        } catch (e) {
-          console.error("Structure subscription callback threw:", e);
-        }
+      dispatchCallbacks(structureSubscriptions, "Structure", function(cb) {
+        cb(name, change);
       });
     }
 
@@ -1341,12 +1475,22 @@ studio.internal = (function(proto) {
       this.ws.onclose = null;  // Prevent triggering close handler
       this.ws.close();
     }
-    this.ws = new WebSocket(url);
-    this.ws.binaryType = binaryType;
-    this.ws.onopen = function(e) { self.onopen && self.onopen(e); };
-    this.ws.onmessage = function(e) { self.onmessage && self.onmessage(e); };
-    this.ws.onclose = function(e) { self.onclose && self.onclose(e); };
-    this.ws.onerror = function(e) { self.onerror && self.onerror(e); };
+    var ws = new WebSocket(url);
+    this.ws = ws;
+    ws.binaryType = binaryType;
+    ws.onopen = function(e) { self.onopen && self.onopen(e); };
+    // Gate message delivery on this specific ws still being OPEN. Between
+    // CLOSING and CLOSED, browsers and Node's ws library may still fire
+    // onmessage for queued frames; after an explicit close() during
+    // reconnect the same handler would otherwise poison the next session
+    // (fire spurious onReconnected, emit a premature structure_request).
+    // onError-without-onclose leaves readyState OPEN, so real frames in
+    // that window are still delivered.
+    ws.onmessage = function(e) {
+      if (ws.readyState === WebSocket.OPEN) self.onmessage && self.onmessage(e);
+    };
+    ws.onclose = function(e) { self.onclose && self.onclose(e); };
+    ws.onerror = function(e) { self.onerror && self.onerror(e); };
   };
 
   obj.AppConnection = function(urlOrTransport, notificationListener, autoConnect) {
@@ -1390,6 +1534,21 @@ studio.internal = (function(proto) {
     const STALL_CHECK_INTERVAL_MS = 15000;
     const STALL_TIMEOUT_MS = (typeof process !== 'undefined' && process.env && Number(process.env.CDP_STALL_TIMEOUT_MS))
         || (INACTIVITY_RESEND_INTERVAL_S + 30) * 1000; // must exceed inactivityResendInterval
+    var nextRequestId = 0;
+    var pendingRequests = new Map(); // requestId -> { type, nodeId, node }
+    // The captured `node` reference is what makes clearPendingByNodeAndType
+    // correct across parseChildNode remaps: nodeIds change but the AppNode
+    // object identity is stable, so a late error can still find its waiter.
+    // Expose a single helper so HelloHandler/AuthHandler can attach a requestId
+    // to the initial structure request they send directly (before AppConnection's
+    // higher-level make*Request methods are used). compatVersion is passed
+    // explicitly because currentMetadata isn't set yet when HelloHandler sends.
+    socketTransport._attachRequestId = function(container, type, nodeId, compatVersion) {
+      if (compatVersion < RESILIENCE_MIN_COMPAT_VERSION) return;
+      var reqId = generateRequestId();
+      container.requestIds = [reqId];
+      trackPendingRequest(reqId, type, nodeId);
+    };
     nodeMap.set(systemNode.id(), systemNode);
     handler.onContainer = handleIncomingContainer;
     this.resubscribe = function(item) {
@@ -1431,6 +1590,13 @@ studio.internal = (function(proto) {
     // Helper to schedule reconnection with exponential backoff
     function scheduleReconnect(logMessage) {
       if (!autoConnect || !isPrimaryConnection || reconnectTimeoutId) return;
+      // Mark the root structure stale synchronously — before the backoff
+      // timer — so any stale frame arriving through another path cannot
+      // flip structureFetched back to true on the stale tree and fire
+      // onReconnected prematurely from the first-Hello block. Done here
+      // (not in cleanupPrimaryConnectionState) so terminal close() does
+      // not strand onDone waiters for 30s on a refetch that will never come.
+      systemNode._markStructureStale();
       var delay = reconnectDelayMs;
       // Add jitter (±20%) to prevent thundering herd
       var jitter = delay * 0.2 * (2 * Math.random() - 1);
@@ -1548,6 +1714,13 @@ studio.internal = (function(proto) {
         // Clear the old connect timeout to prevent it from killing the new connection
         clearTimeout(connectTimeoutId);
         connectTimeoutId = null;
+        // Drop the old instanceKey from the service routing table so late
+        // messages from the abandoned service instance can no longer reach
+        // this transport and re-enter the container handler. Without this,
+        // a stale eData carrying an old structure payload would still be
+        // dispatched to the new session's handler, call node.done(), and
+        // race past connectViaProxy's _markStructureStale wait with old data.
+        serviceInstances.delete(instanceKey);
         serviceId = newServiceId;
         instanceId = allocateInstanceId(serviceId);
         instanceKey = serviceId + ':' + instanceId;
@@ -1605,7 +1778,7 @@ studio.internal = (function(proto) {
     function resendServicesRequest() {
       if (currentMetadata && currentMetadata.compatVersion >= PROXY_MIN_COMPAT_VERSION) {
         console.log("Did not receive services notification within expected interval. Re-requesting services.");
-        send(proto.createServicesRequestBytes());
+        send(function() { return proto.createServicesRequestBytes(); });
         resetServicesTimeout();
       }
     }
@@ -1622,6 +1795,112 @@ studio.internal = (function(proto) {
       servicesTimeoutId = null;
     }
 
+    function isResilienceSupported() {
+      return currentMetadata && currentMetadata.compatVersion >= RESILIENCE_MIN_COMPAT_VERSION;
+    }
+
+    function generateRequestId() {
+      do {
+        nextRequestId = (nextRequestId + 1) >>> 0;
+      } while (nextRequestId === 0);
+      return nextRequestId;
+    }
+
+    function trackPendingRequest(reqId, type, nodeId) {
+      // Capture the target node so a late error can still reject waiters
+      // even if parseChildNode remapped the node to a new id in the
+      // meantime — a reconnect that returns the same node under a
+      // different id would otherwise leave the old requestId's entry
+      // pointing at a nodeId no longer in nodeMap. Skip tracking when
+      // the node is not in nodeMap (user holds a reference to a
+      // previously-removed AppNode and calls fetch on it): the request
+      // still goes on the wire and the error correlation just logs
+      // generically instead of rejecting waiters on a stale reference.
+      var node = nodeMap.get(nodeId);
+      if (!node) return;
+      pendingRequests.set(reqId, { type: type, nodeId: nodeId, node: node });
+    }
+
+    // Attach a client-generated request_id to an outgoing one-shot request
+    // (structure / setter / childAdd / childRemove) and track the pending
+    // entry. For structure, also drop any prior pending structure entry
+    // for the same nodeId: onDone/givenPromises are keyed by node, not by
+    // request id, so leaving an older id in the map lets a late error for
+    // the superseded fetch reject the newer in-flight fetch's waiters.
+    // Setter/childAdd/childRemove are per-operation and do not share
+    // waiter state, so overlapping ids must each track independently.
+    function attachRequestId(msg, type, nodeId) {
+      if (!isResilienceSupported()) return;
+      var reqId = generateRequestId();
+      msg.requestIds = [reqId];
+      if (type === 'structure') clearPendingByNodeAndType(nodeId, type);
+      trackPendingRequest(reqId, type, nodeId);
+    }
+
+    // Attach a request_id to a subscribe/unsubscribe request (getter /
+    // event). Drops any prior pending entry for (nodeId, type) so the map
+    // holds at most one live id per subscription across rapid subscribe
+    // churn (fs/sampleRate changes, unsubscribe-without-stop).
+    //
+    // Stop (unsubscribe) frames carry a request_id but are deliberately
+    // NOT tracked: the user-side subscription record is already removed
+    // before the stop frame goes on the wire, there is no Promise to
+    // reject on failure, and a failed unsubscribe is recovered by the
+    // next reconnect's clean state. Skipping the entry means that if the
+    // server replies with an error for an unsubscribe, parseErrorResponse
+    // falls through to the generic "Received error response" log line
+    // instead of a typed "Request failed: type=…" — a small diagnostic
+    // regression on a rare path, traded for not creating entries that
+    // can leak when the server's response for the unsubscribe never
+    // arrives (e.g. server-side path doesn't echo for that type).
+    function attachSubscribeRequestId(msg, type, nodeId, stop) {
+      if (!isResilienceSupported()) return;
+      var reqId = generateRequestId();
+      msg.requestIds = [reqId];
+      clearPendingByNodeAndType(nodeId, type);
+      if (!stop) trackPendingRequest(reqId, type, nodeId);
+    }
+
+    // Clear any pending entry whose response has now arrived. Applies to
+    // all request types: structure/setter/childAdd/childRemove one-shots,
+    // and getter/event subscribe confirmations — the server attaches the
+    // request_id only to the initial confirmation response (first value
+    // for getter, empty confirmation event for event), so after that the
+    // id is no longer in play. Leaving the entry around would also risk
+    // misrouting when the uint32 request_id counter wraps and reuses the
+    // same id for a new request.
+    function clearPendingByRequestIds(requestIds) {
+      for (var i = 0; i < requestIds.length; i++) {
+        pendingRequests.delete(requestIds[i]);
+      }
+    }
+
+    // Drop any prior pending entry for (node, type). Matched by captured
+    // node reference, not stored nodeId, because parseChildNode can remap
+    // a live AppNode from one server id to another across reconnect
+    // (entry.nodeId is the value at track time; entry.node is stable).
+    // Matching by id alone would leave the pre-remap entry in place, and
+    // a late error for the old id would then reject the replacement
+    // fetch's waiters on the same node via the captured-node rejection
+    // path. Used for structure fetches and for subscribe churn.
+    function clearPendingByNodeAndType(nodeId, type) {
+      var currentNode = nodeMap.get(nodeId);
+      if (!currentNode) return;
+      for (var entry of pendingRequests) {
+        if (entry[1].type === type && entry[1].node === currentNode) {
+          pendingRequests.delete(entry[0]);
+        }
+      }
+    }
+
+    // Exposed so AppNode's onDone timeout can drop the matching pending entry.
+    // Without this, a late response arriving after the user already saw the
+    // 30s timeout would still pass the parseStructureResponse stale-success
+    // guard (the entry is still in pendingRequests) and mutate the tree.
+    this.dropPendingStructureForNode = function(nodeId) {
+      clearPendingByNodeAndType(nodeId, 'structure');
+    };
+
     // Stall detection: force-close socket if no server messages for STALL_TIMEOUT_MS
     // while there are active subscriptions expecting data. Without subscriptions,
     // silence is expected and not a stall.
@@ -1632,10 +1911,32 @@ studio.internal = (function(proto) {
       return false;
     }
 
+    // Per-subscription liveness check on resilient connections (compat >= 3).
+    // The server resends idle value/event subscriptions every
+    // INACTIVITY_RESEND_INTERVAL_S; if no activity has been received for
+    // SUBSCRIPTION_LIVENESS_THRESHOLD_MS, the channel is treated as stalled
+    // and a resubscribe (rather than full reconnect) is issued as the
+    // recovery action.
+    function checkSubscriptionLiveness() {
+      if (!isResilienceSupported()) return;
+      var now = Date.now();
+      for (var node of nodeMap.values()) {
+        if (node.hasValueSubscriptions()
+            && now - node._lastValueActivityMs() > SUBSCRIPTION_LIVENESS_THRESHOLD_MS) {
+          node._resubscribeValues();
+        }
+        if (node.hasEventSubscriptions()
+            && now - node._lastEventActivityMs() > SUBSCRIPTION_LIVENESS_THRESHOLD_MS) {
+          node._resubscribeEvents();
+        }
+      }
+    }
+
     function startStallDetection() {
       if (stallCheckIntervalId) return;
       lastServerMessageTime = Date.now();
       stallCheckIntervalId = setInterval(function() {
+        checkSubscriptionLiveness();
         if (lastServerMessageTime > 0 && hasAnyActiveSubscriptions() &&
             Date.now() - lastServerMessageTime > STALL_TIMEOUT_MS) {
           console.log("Connection stalled: no server messages for " + STALL_TIMEOUT_MS + "ms with active subscriptions, forcing reconnect");
@@ -1643,6 +1944,13 @@ studio.internal = (function(proto) {
           socketTransport.close();
         }
       }, STALL_CHECK_INTERVAL_MS);
+      // Don't hold the Node.js event loop open for this background timer —
+      // short-lived CLI scripts should be able to exit cleanly on completion
+      // without calling close(). Browser's setInterval returns a number with
+      // no .unref(), hence the feature check.
+      if (typeof stallCheckIntervalId.unref === 'function') {
+        stallCheckIntervalId.unref();
+      }
     }
 
     function stopStallDetection() {
@@ -1668,6 +1976,12 @@ studio.internal = (function(proto) {
       currentMetadata = null;
       requests = [];
       stopStallDetection();
+      pendingRequests.clear();
+      // nextRequestId is NOT reset: the old WebSocket's onmessage handler
+      // remains attached between close() and the CLOSED handshake, so
+      // buffered frames from the old socket can still reach the new
+      // handler. Keeping the counter monotonic ensures those stale ids
+      // cannot alias newly-issued pending requests.
     }
 
     this.onServicesReceived = function(services, metadata) {
@@ -1756,8 +2070,10 @@ studio.internal = (function(proto) {
         // Reconnect existing transport with new service instance — preserves nodes and callbacks
         proxyConnection = existingConnection;
         var transport = proxyConnection._getTransport();
-        // Set onopen to trigger handler recreation + resubscribe (the original onopen
-        // was overwritten by the first connectViaProxy call's new-connection handler)
+        // Set onopen to restart stall detection and trigger handler recreation
+        // (the original onopen was overwritten by the first connectViaProxy call's
+        // new-connection handler); the descendant walk and onReconnected fire
+        // indirectly when the new Hello enters the first-Hello block.
         transport.onopen = function() {
           proxyConnection._startStallDetection();
           proxyConnection._triggerReconnect();
@@ -1811,9 +2127,13 @@ studio.internal = (function(proto) {
             rejectOnce(new Error(event.reason || 'Connection closed'));
           };
         } else {
-          // For reconnection, the AppConnection's onOpen calls resubscribe(systemNode).
-          // We just need to wait for structure to resolve the promise.
+          // For reconnection: mark the root stale before awaiting onDone
+          // so the wait blocks until the new Hello triggers the deferred
+          // resubscribe + structure refetch. Without this, the old
+          // session's structureFetched=true would resolve us immediately,
+          // before the new tunnel has even completed its handshake.
           var sys = proxyConnection.root();
+          sys._markStructureStale();
           sys.async.onDone(function() {
             if (!settled) {
               settled = true;
@@ -1844,10 +2164,12 @@ studio.internal = (function(proto) {
       if (payload) {
         serviceMessage.payload = payload;
       }
-      var msg = proto.Container.create();
-      msg.messageType = proto.ContainerType.eServiceMessage;
-      msg.serviceMessage = [serviceMessage];
-      send(proto.Container.encode(msg).finish());
+      send(function() {
+        var msg = proto.Container.create();
+        msg.messageType = proto.ContainerType.eServiceMessage;
+        msg.serviceMessage = [serviceMessage];
+        return proto.Container.encode(msg).finish();
+      });
     };
 
     // Returns true if proxy protocol is supported (compat >= PROXY_MIN_COMPAT_VERSION)
@@ -1866,25 +2188,25 @@ studio.internal = (function(proto) {
       scheduleReconnect("Retrying reconnect after error...");
     };
     onOpen = function() {
+      // The browser/Node ws library can deliver a queued 'open' after a
+      // synchronous close() if the open was already in flight. Match the
+      // other three handlers (onError, onClosed, handleIncomingContainer)
+      // so a post-close onOpen does not re-arm stall detection on a
+      // connection the user has explicitly torn down.
+      if (closedIntentionally) return;
       // Clear any pending reconnect timeout since we're now connected
       clearTimeout(reconnectTimeoutId);
       reconnectTimeoutId = null;
       reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
       hasNotifiedDisconnect = false; // Reset disconnect guard for next cycle
       startStallDetection();
+      // Resubscribe + onReconnected lifecycle are deferred to
+      // handleIncomingContainer's first-Hello block: at onOpen time
+      // currentMetadata is still null (cleared on disconnect), so any
+      // make*Request fired from here would bypass isResilienceSupported()
+      // and send an uncorrelated eStructureRequest with no request_id.
       // Note: For proxy connections, connectViaProxy overwrites transport.onopen
       // and calls _startStallDetection() there instead.
-      // Primary handler recreation happens in scheduleReconnect before reconnect().
-      appConnection.resubscribe(systemNode);
-      // Notify lifecycle callback after structure refetch completes (not on initial connect)
-      if (hasConnectedBefore && appConnection.onReconnected) {
-        systemNode.async.onDone(function() {
-          appConnection.onReconnected();
-        }, function(err) {
-          console.error("Structure refetch failed on reconnect:", err);
-        }, systemNode);
-      }
-      hasConnectedBefore = true;
     };
     onClosed = function (event) {
       if (closedIntentionally) return;
@@ -1959,99 +2281,135 @@ studio.internal = (function(proto) {
       return result;
     }
 
-    function send(message) {
+    // `send` takes a BUILDER function (not pre-encoded bytes). The builder
+    // constructs the Container, calls attachRequestId/attachSubscribeRequestId
+    // (which depend on currentMetadata being set), and returns the encoded
+    // bytes. When the socket is OPEN the builder runs immediately; otherwise
+    // it is queued and runs at flushRequests time. This ensures a request
+    // issued BEFORE Hello (currentMetadata is null) still gets a request_id
+    // attached when it actually goes on the wire after Hello sets the
+    // metadata — without this, compat>=3 sessions could leak untagged
+    // requests from the pre-Hello / reconnect window.
+    function send(builder) {
       if (!socketTransport) return;  // Connection was closed
       if (socketTransport.readyState() == WebSocket.OPEN) {
-        socketTransport.send(message);
+        socketTransport.send(builder());
       } else {
-        requests.push(message);
+        requests.push(builder);
       }
     }
 
     function flushRequests() {
       if (!socketTransport) return;  // Connection was closed
       for (var i = 0; i < requests.length; i++) {
-        socketTransport.send(requests[i]);
+        socketTransport.send(requests[i]());
       }
       requests = [];
     }
 
     this.makeStructureRequest = function(id) {
-      var msg = proto.Container.create();
-      msg.messageType = proto.ContainerType.eStructureRequest;
-      if (id != proto.SYSTEM_NODE_ID) {
-        msg.structureRequest = [id];
-      }
-      send(proto.Container.encode(msg).finish());
+      // Build lazily: attachRequestId needs currentMetadata, which may not
+      // be set yet if the user called fetch() before Hello arrived.
+      // Encoding + attach run at flush time when metadata IS available.
+      send(function() {
+        var msg = proto.Container.create();
+        msg.messageType = proto.ContainerType.eStructureRequest;
+        // On resilient connections (compat >= 3) always populate
+        // structure_request[] — the server treats an empty array with a
+        // request_id as an invalidation ack, so omitting the id silently
+        // breaks the root refetch. On legacy connections (compat < 3)
+        // preserve the original encoding: empty structure_request for
+        // SYSTEM_NODE_ID (root fetch), populated otherwise.
+        if (isResilienceSupported() || id != proto.SYSTEM_NODE_ID) {
+          msg.structureRequest = [id];
+        }
+        attachRequestId(msg, 'structure', id);
+        return proto.Container.encode(msg).finish();
+      });
     };
 
     this.makeGetterRequest = function(id, fs, sampleRate, stop) {
-      var msg = proto.Container.create();
-      var request = proto.ValueRequest.create();
-      request.nodeId = id;
-      request.fs = fs;
-      if (sampleRate !== undefined) {
-        request.sampleRate = sampleRate;
-      }
-      if (stop) {
-        request.stop = stop;
-      } else {
-        request.inactivityResendInterval = INACTIVITY_RESEND_INTERVAL_S;
-      }
-      msg.messageType = proto.ContainerType.eGetterRequest;
-      msg.getterRequest = [request];
-      send(proto.Container.encode(msg).finish());
+      send(function() {
+        var msg = proto.Container.create();
+        var request = proto.ValueRequest.create();
+        request.nodeId = id;
+        request.fs = fs;
+        if (sampleRate !== undefined) {
+          request.sampleRate = sampleRate;
+        }
+        if (stop) {
+          request.stop = stop;
+        } else {
+          request.inactivityResendInterval = INACTIVITY_RESEND_INTERVAL_S;
+        }
+        msg.messageType = proto.ContainerType.eGetterRequest;
+        msg.getterRequest = [request];
+        attachSubscribeRequestId(msg, 'getter', id, stop);
+        return proto.Container.encode(msg).finish();
+      });
     };
 
     this.makeEventRequest = function(id, startingFrom, stop) {
-      var msg = proto.Container.create();
-      var request = proto.EventRequest.create();
-      request.nodeId = id;
-      if (stop) {
-        request.stop = stop;
-      } else {
-        request.inactivityResendInterval = INACTIVITY_RESEND_INTERVAL_S;
-      }
-      if (startingFrom != undefined) {
-        request.startingFrom = startingFrom;
-      }
-      msg.messageType = proto.ContainerType.eEventRequest;
-      msg.eventRequest = [request];
-      send(proto.Container.encode(msg).finish());
+      send(function() {
+        var msg = proto.Container.create();
+        var request = proto.EventRequest.create();
+        request.nodeId = id;
+        if (stop) {
+          request.stop = stop;
+        } else {
+          request.inactivityResendInterval = INACTIVITY_RESEND_INTERVAL_S;
+        }
+        if (startingFrom != undefined) {
+          request.startingFrom = startingFrom;
+        }
+        msg.messageType = proto.ContainerType.eEventRequest;
+        msg.eventRequest = [request];
+        attachSubscribeRequestId(msg, 'event', id, stop);
+        return proto.Container.encode(msg).finish();
+      });
     };
 
     this.makeChildAddRequest = function(id, name, modelName){
-      var msg = proto.Container.create();
-      var request = proto.ChildAdd.create();
-      request.parentNodeId = id;
-      request.childName = name;
-      request.childTypeName = modelName;
-      msg.messageType = proto.ContainerType.eChildAddRequest;
-      msg.childAddRequest = [request];
-      send(proto.Container.encode(msg).finish());
+      send(function() {
+        var msg = proto.Container.create();
+        var request = proto.ChildAdd.create();
+        request.parentNodeId = id;
+        request.childName = name;
+        request.childTypeName = modelName;
+        msg.messageType = proto.ContainerType.eChildAddRequest;
+        msg.childAddRequest = [request];
+        attachRequestId(msg, 'childAdd', id);
+        return proto.Container.encode(msg).finish();
+      });
     }
 
     this.makeChildRemoveRequest = function(id, name){
-      var msg = proto.Container.create();
-      var request = proto.ChildRemove.create();
-      request.parentNodeId = id;
-      request.childName = name;
-      msg.messageType = proto.ContainerType.eChildRemoveRequest;
-      msg.childRemoveRequest = [request];
-      send(proto.Container.encode(msg).finish());
+      send(function() {
+        var msg = proto.Container.create();
+        var request = proto.ChildRemove.create();
+        request.parentNodeId = id;
+        request.childName = name;
+        msg.messageType = proto.ContainerType.eChildRemoveRequest;
+        msg.childRemoveRequest = [request];
+        attachRequestId(msg, 'childRemove', id);
+        return proto.Container.encode(msg).finish();
+      });
     }
 
     this.makeSetterRequest = function(id, type, value, timestamp) {
-      var msg = proto.Container.create();
-      var request = proto.VariantValue.create();
-      request.nodeId = id;
-      if (timestamp) {
-        request.timestamp = timestamp;
-      }
-      proto.valueToVariant(request, type, value);
-      msg.messageType = proto.ContainerType.eSetterRequest;
-      msg.setterRequest = [request];
-      send(proto.Container.encode(msg).finish());
+      send(function() {
+        var msg = proto.Container.create();
+        var request = proto.VariantValue.create();
+        request.nodeId = id;
+        if (timestamp) {
+          request.timestamp = timestamp;
+        }
+        proto.valueToVariant(request, type, value);
+        msg.messageType = proto.ContainerType.eSetterRequest;
+        msg.setterRequest = [request];
+        attachRequestId(msg, 'setter', id);
+        return proto.Container.encode(msg).finish();
+      });
     };
 
     function makeReauthRequest(dict, challenge) {
@@ -2059,10 +2417,12 @@ studio.internal = (function(proto) {
       reauthRequestPending = true;
       proto.CreateAuthRequest(dict, challenge)
         .then(function(request){
-          var msg = proto.Container.create();
-          msg.messageType = proto.ContainerType.eReauthRequest;
-          msg.reAuthRequest = request;
-          send(proto.Container.encode(msg).finish());
+          send(function() {
+            var msg = proto.Container.create();
+            msg.messageType = proto.ContainerType.eReauthRequest;
+            msg.reAuthRequest = request;
+            return proto.Container.encode(msg).finish();
+          });
         })
         .catch(function(err) {
           console.error("Failed to create reauth request:", err);
@@ -2123,10 +2483,32 @@ studio.internal = (function(proto) {
       parseNodes(node, protoNode);
     }
 
-    function parseStructureResponse(protoResponse) {
+    function parseStructureResponse(protoResponse, requestIds) {
       for (var i = 0; i < protoResponse.length; i++) {
         var protoNode = protoResponse[i];
+        // Out-of-order stale response guard: if this response carries a
+        // request_id that is no longer in pendingRequests, a newer
+        // fetch for the same node has already superseded it (via
+        // clearPendingByNodeAndType in attachRequestId). Applying the
+        // stale tree would resolve the newer fetch's onDone waiters
+        // with old children and repopulate the node from a past
+        // snapshot. The truthiness gate covers both legacy (requestIds
+        // is [] so requestIds[i] is undefined) and the resilient
+        // request_id=0 placeholder (see studioapi.proto comment on
+        // Container.request_ids — 0 marks positions with no id).
+        if (requestIds[i] && !pendingRequests.has(requestIds[i])) {
+          continue;
+        }
         var node = nodeMap.get(protoNode.info.nodeId);
+        // The node may be absent from nodeMap if a structure response for
+        // it arrives after a parent's restructure pruned it via
+        // removeMissingChildNodesByNames. The truthy-requestIds guard
+        // above only skips supersession, not deletion. Without this skip
+        // node.done() below would TypeError; clearPendingByRequestIds
+        // (in handleIncomingContainer) still drops the stale entry.
+        if (!node) {
+          continue;
+        }
         if (protoNode.info.nodeId != proto.SYSTEM_NODE_ID) {
           parseNodes(node, protoNode);
         } else {
@@ -2146,30 +2528,67 @@ studio.internal = (function(proto) {
       }
     }
 
-    function parseStructureChangeResponse(protoResponse) {
+    function parseStructureChangeResponse(protoResponse, requestIds) {
+      // Tracked nodes: refetch — the fresh structure_request acks all of
+      // that nodeId's pending invalidations server-side. Untracked nodes
+      // (e.g. parent restructure removed them before the invalidation
+      // arrived): echo the server's request_id back in an empty
+      // structure_request so the server stops retransmitting it.
+      var untrackedIds = [];
       for (var i = 0; i < protoResponse.length; i++) {
         var invalidatedId = protoResponse[i];
         var node = nodeMap.get(invalidatedId);
-        if (node)
+        if (node) {
           node.async.fetch();
+        } else if (requestIds[i]) {
+          untrackedIds.push(requestIds[i]);
+        }
+      }
+      if (untrackedIds.length > 0) {
+        send(function() {
+          var msg = proto.Container.create();
+          msg.messageType = proto.ContainerType.eStructureRequest;
+          msg.structureRequest = [];
+          msg.requestIds = untrackedIds;
+          return proto.Container.encode(msg).finish();
+        });
       }
     }
 
     function parseEventResponse(protoResponse) {
       for (var i = 0; i < protoResponse.length; i++) {
         var variantValue = protoResponse[i];
+        // The server emits an empty event (id=0, no sender, timestamp=0,
+        // no data) to confirm subscription activation, and resends it
+        // under inactivity_resend_interval for subscriptions whose last
+        // sent event is still that confirmation. We must NOT deliver these
+        // to user callbacks (would look like a spurious zero-alarm) but
+        // they ARE proof the subscription is healthy, so the per-node
+        // liveness clock and one-shot resub flag still need to be
+        // refreshed. Without that refresh, a quiet but healthy event
+        // subscription would be falsely resubscribed by the liveness
+        // monitor every threshold cycle.
+        // Gated on compat_version >= 3 — on legacy servers this pattern
+        // could match a real event and the confirmation feature does not
+        // exist in the protocol anyway.
+        var isEmptyKeepalive = isResilienceSupported()
+            && Number(variantValue.id) === 0 && !variantValue.sender
+            && Number(variantValue.timestamp) === 0
+            && variantValue.data.length === 0;
         for (var j = 0; j < variantValue.nodeId.length; j++) {
           var node = nodeMap.get(variantValue.nodeId[j]);
-          if (node){
-            var event = {
+          if (!node) continue;
+          if (isEmptyKeepalive) {
+            node._noteEventKeepalive();
+          } else {
+            node.receiveEvent({
               id: variantValue.id,
               sender: variantValue.sender,
               code: variantValue.code,
               status: variantValue.status,
               timestamp: variantValue.timestamp,
               data: variantValue.data
-            };
-            node.receiveEvent(event);
+            });
           }
         }
       }
@@ -2195,22 +2614,70 @@ studio.internal = (function(proto) {
       }
     }
 
-    function parseErrorResponse(protoResponse, metadata) {
+    function parseErrorResponse(protoResponse, metadata, requestIds) {
       if (!reauthRequestPending && protoResponse.code == proto.RemoteErrorCode.eAUTH_RESPONSE_EXPIRED) {
         reauthRequestPending = true;  // Set BEFORE async to prevent duplicate reauth calls
         var userAuthResult = new studio.api.UserAuthResult(proto.AuthResultCode.eReauthenticationRequired, protoResponse.text, null);
         metadata.challenge = protoResponse.challenge;
         reauthenticate(userAuthResult, metadata);
+        // The session is gone — all in-flight requests are orphaned. The
+        // server does NOT echo request_ids on auth-expired notifications
+        // (the expiry is either unsolicited or raised before the per-request
+        // id has been associated), so per-id correlation would be a no-op.
+        // Walk pendingRequests, reject every structure waiter connection-wide,
+        // and clear the map. Callers see immediate failure instead of stalling
+        // for STRUCTURE_REQUEST_TIMEOUT_MS (30s), and retry once reauth
+        // succeeds through the normal API.
+        pendingRequests.forEach(function(entry) {
+          if (entry.type === 'structure') {
+            entry.node.rejectPendingFetches();
+          }
+        });
+        pendingRequests.clear();
+        return;
       }
-      else
+      // The request_ids field is repeated at the Container level, so a single
+      // error container can correlate to multiple pending requests. Clear
+      // every matching entry, reject any structure waiters so callers see
+      // the failure immediately instead of stalling for 30s, and log the
+      // originator's nodeId/type. attachRequestId drops any prior pending
+      // structure entry for a node when a new fetch is issued, so the only
+      // id still in the map for a given (node, 'structure') is the latest —
+      // an error that still matches is authoritative for the current fetch,
+      // and rejecting the node's waiters is correct. Node validity is left
+      // intact — flipping isValid without also pruning from parent/nodeMap
+      // would leave an "invalid but reachable" contradiction; the parent's
+      // next structure fetch prunes stale children through
+      // removeMissingChildNodesByNames.
+      var matched = 0;
+      for (var i = 0; i < requestIds.length; i++) {
+        var entry = pendingRequests.get(requestIds[i]);
+        if (!entry) continue;
+        pendingRequests.delete(requestIds[i]);
+        matched++;
+        console.log("Request failed: type=" + entry.type + " nodeId=" + entry.nodeId
+          + " code=" + protoResponse.code + ' text="' + protoResponse.text + '"');
+        if (entry.type === 'structure') {
+          entry.node.rejectPendingFetches();
+        }
+      }
+      if (matched === 0) {
         console.log("Received error response with code " + protoResponse.code
           + ' and text: "' + protoResponse.text + '"');
+      }
     }
 
     function handleIncomingContainer(protoContainer, metadata) {
+      // Drop every container after intentional close(). Reconnect paths
+      // rely on the readyState gate on the old ws's onmessage wrapper to
+      // drop buffered frames from sockets that have been closed; frames
+      // arriving on a socket whose readyState is still OPEN (e.g.
+      // onerror-without-onclose windows) stay eligible and keep
+      // lastServerMessageTime fresh for stall detection.
+      if (closedIntentionally) return;
       lastServerMessageTime = Date.now(); // Update stall detection timestamp
       // Set currentMetadata from Hello message immediately (not just on ServicesNotification)
-      // This ensures supportsProxyProtocol() works before ServicesNotification arrives
+      // This ensures supportsProxyProtocol() works before ServicesNotification arrives.
       if (!currentMetadata && metadata) {
         currentMetadata = metadata;
         // Start services timeout for primary connections with proxy support
@@ -2218,19 +2685,67 @@ studio.internal = (function(proto) {
         if (isPrimaryConnection && metadata.compatVersion >= PROXY_MIN_COMPAT_VERSION && !servicesTimeoutId) {
           resetServicesTimeout();
         }
+        // Reconnect descendant walk and the onReconnected lifecycle run
+        // here, after compatVersion is known, so that make*Request calls
+        // emitted for re-fetched subtrees can correctly attach request_ids
+        // on resilient servers. Deferring from onOpen/_triggerReconnect was
+        // necessary because currentMetadata is cleared on disconnect and
+        // the old code fired resubscribe synchronously before the new
+        // Hello arrived, producing untagged reconnect refetches.
+        //
+        // The walk is further deferred until systemNode's structure has
+        // settled: cleanupPrimaryConnectionState's scheduleReconnect path
+        // and connectViaProxy's reconnect path both call _markStructureStale()
+        // so structureFetched is false here, and resubscribe's
+        // item.isStructureFetched() gate would otherwise turn the call into
+        // a no-op and skip the descendant walk. Walking children directly
+        // (instead of calling resubscribe(systemNode)) also avoids a second
+        // structure_request for the root — HelloHandler's initial fetch has
+        // already populated it, and parseStructureResponse's update() call
+        // has already restored root's own value/event subscriptions.
+        //
+        // hasConnectedBefore is set inside the onDone success callback (not
+        // here after the Hello) so that a connection attempt whose initial
+        // structure fetch fails does not latch the reconnect signal — the
+        // next retry would otherwise fire onReconnected spuriously, before
+        // any successful connect had ever been observed.
+        if (hasConnectedBefore) {
+          systemNode.async.onDone(function() {
+            systemNode.forEachChild(function(child) {
+              if (child.isStructureFetched()) {
+                appConnection.resubscribe(child);
+              }
+            });
+            if (appConnection.onReconnected) appConnection.onReconnected();
+          }, function(err) {
+            console.error("Structure refetch failed on reconnect:", err);
+          }, systemNode);
+        } else {
+          systemNode.async.onDone(function() {
+            hasConnectedBefore = true;
+          }, function() {}, systemNode);
+        }
       }
       switch(protoContainer.messageType){
         case proto.ContainerType.eStructureResponse:
-          parseStructureResponse(protoContainer.structureResponse);
+          parseStructureResponse(protoContainer.structureResponse, protoContainer.requestIds);
+          clearPendingByRequestIds(protoContainer.requestIds);
           break;
         case proto.ContainerType.eGetterResponse:
           parseGetterResponse(protoContainer.getterResponse);
+          clearPendingByRequestIds(protoContainer.requestIds);
           break;
         case proto.ContainerType.eStructureChangeResponse:
-          parseStructureChangeResponse(protoContainer.structureChangeResponse);
+          // Invalidation notifications carry server-generated request_ids
+          // for invalidation tracking, which share a uint32 space with the
+          // client's request_ids and can randomly collide. They must not
+          // touch pendingRequests — they are echoed back in the empty
+          // structure_request ack for untracked nodes instead.
+          parseStructureChangeResponse(protoContainer.structureChangeResponse, protoContainer.requestIds);
           break;
         case proto.ContainerType.eEventResponse:
           parseEventResponse(protoContainer.eventResponse);
+          clearPendingByRequestIds(protoContainer.requestIds);
           break;
         case proto.ContainerType.eCurrentTimeResponse:
           break;
@@ -2238,7 +2753,15 @@ studio.internal = (function(proto) {
           parseReauthResponse(protoContainer.reAuthResponse, metadata);
           break;
         case proto.ContainerType.eRemoteError:
-          parseErrorResponse(protoContainer.error, metadata);
+          if (protoContainer.error) {
+            parseErrorResponse(protoContainer.error, metadata, protoContainer.requestIds);
+          } else {
+            // Server uses an empty Container (no error set, message_type
+            // default 0 == eRemoteError) with only request_ids as the
+            // success ack for childAdd / childRemove. Clear the matching
+            // pending entry without logging.
+            clearPendingByRequestIds(protoContainer.requestIds);
+          }
           break;
         case proto.ContainerType.eServicesNotification:
           if (protoContainer.servicesNotification && protoContainer.servicesNotification.services) {
@@ -2262,11 +2785,17 @@ studio.internal = (function(proto) {
       return socketTransport;
     };
 
-    // Trigger reconnection logic for proxy connections (called by connectViaProxy on reconnect)
+    // Proxy reconnect path. Clear per-connection state so the first-Hello
+    // block (gated on currentMetadata being null) re-runs the descendant
+    // walk and onReconnected when the next Hello arrives. nextRequestId is
+    // NOT reset — the primary WebSocket survives the tunnel reconnect and
+    // can still deliver old-instance replies; keeping the counter monotonic
+    // prevents them aliasing new ids.
     this._triggerReconnect = function() {
+      currentMetadata = null;
+      pendingRequests.clear();
       handler = new proto.Handler(socketTransport, notificationListener);
       handler.onContainer = handleIncomingContainer;
-      appConnection.resubscribe(systemNode);
     };
 
     /**

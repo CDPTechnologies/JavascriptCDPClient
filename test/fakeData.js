@@ -35,6 +35,13 @@ class FakeSocket {
     this.onopen = null;
   }
 
+  // Stub for the request-id-attach hook that AppConnection installs on
+  // production socketTransport. Tests that wire `protocol.Handler` directly
+  // around a FakeSocket bypass AppConnection, so without this stub the
+  // initial-structure-request path would either crash or require a guard
+  // in production code.
+  _attachRequestId() {}
+
   send(buf) {
     if (this.closed) {
       throw new Error('WebSocket is closed');

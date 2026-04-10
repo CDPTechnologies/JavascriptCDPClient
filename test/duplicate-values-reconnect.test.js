@@ -242,7 +242,7 @@ describe('Reconnection - WebSocket Primary Connection', () => {
     }
   });
 
-  test('should re-send structure request on reconnect (resubscribe calls fetch)', async () => {
+  test('should re-send structure request on reconnect (resubscribe walks descendants)', async () => {
     jest.useFakeTimers();
 
     const originalWebSocket = global.WebSocket;
@@ -255,17 +255,47 @@ describe('Reconnection - WebSocket Primary Connection', () => {
 
       await jest.advanceTimersByTimeAsync(10);
 
-      // Initialize connection
+      const childNodeId = 5151;
+      const childName = 'ChildApp';
+
+      // Initialize connection with a child so the tree has a descendant to
+      // walk on reconnect. Without a child, HelloHandler's own root-structure
+      // request would satisfy a weaker assertion and the test would pass even
+      // if the reconnect descendant walk were deleted.
       ws.simulateMessage(createHelloMessage({ compatVersion: 4 }));
       await jest.advanceTimersByTimeAsync(10);
-      ws.simulateMessage(createSystemStructureResponse('TestSystem'));
+      ws.simulateMessage(createSystemStructureResponse('TestSystem', [
+        { nodeId: childNodeId, name: childName, isLocal: true,
+          nodeType: CDPNodeType.CDP_APPLICATION }
+      ]));
       await jest.advanceTimersByTimeAsync(10);
 
-      // Subscribe to values - this should be restored after reconnect
+      // Fetch the child's structure so child.structureFetched becomes true —
+      // only nodes in this state are walked by the reconnect descendant pass.
+      let childNode = null;
+      app.root().forEachChild(function(c) { if (c.name() === childName) childNode = c; });
+      expect(childNode).not.toBeNull();
+      childNode.async.fetch();
+      await jest.advanceTimersByTimeAsync(10);
+      ws.simulateMessage(protocol.Container.encode(protocol.Container.create({
+        messageType: ContainerType.eStructureResponse,
+        structureResponse: [{
+          info: {
+            nodeId: childNodeId,
+            name: childName,
+            nodeType: CDPNodeType.CDP_APPLICATION,
+            isLocal: true
+          },
+          node: []
+        }]
+      })).finish());
+      await jest.advanceTimersByTimeAsync(10);
+      expect(childNode.isStructureFetched()).toBe(true);
+
+      // Subscribe to values on root so update() has a subscription to replay.
       const consumer = jest.fn();
       app.root().async.subscribeToValues(consumer, 5, 0);
 
-      // Count getter requests sent on first connection
       const firstWsGetterRequests = ws.getAllSentContainers()
         .filter(c => c.messageType === ContainerType.eGetterRequest);
       expect(firstWsGetterRequests.length).toBeGreaterThan(0);
@@ -280,23 +310,41 @@ describe('Reconnection - WebSocket Primary Connection', () => {
       // Wait for reconnect
       await jest.advanceTimersByTimeAsync(3000);
 
-      // New WebSocket created
       expect(instances.length).toBe(2);
       const ws2 = instances[1];
 
-      // Simulate new connection opening - THIS triggers resubscribe()
       ws2.readyState = 1;
       if (ws2.onopen) {
         ws2.onopen({});
       }
-
       await jest.advanceTimersByTimeAsync(10);
 
-      // VERIFY: New WebSocket should have received structure request (from resubscribe)
-      // resubscribe() calls fetch() which sends structure request
+      // Deliver the new Hello + structure. The reconnect descendant walk is
+      // deferred from onOpen to the first-Hello branch in handleIncomingContainer
+      // so that the re-fetch requests see the new compatVersion and attach
+      // request_ids on resilient servers.
+      ws2.simulateMessage(createHelloMessage({ compatVersion: 4 }));
+      await jest.advanceTimersByTimeAsync(10);
+      ws2.simulateMessage(createSystemStructureResponse('TestSystem', [
+        { nodeId: childNodeId, name: childName, isLocal: true,
+          nodeType: CDPNodeType.CDP_APPLICATION }
+      ]));
+      await jest.advanceTimersByTimeAsync(10);
+
       const ws2StructureRequests = ws2.getAllSentContainers()
         .filter(c => c.messageType === ContainerType.eStructureRequest);
-      expect(ws2StructureRequests.length).toBeGreaterThan(0);
+      // Every structure request on a resilient server must carry a non-zero
+      // request_id so the server can correlate the response.
+      for (const req of ws2StructureRequests) {
+        expect(req.requestIds.length).toBeGreaterThan(0);
+        for (const id of req.requestIds) expect(id).toBeGreaterThan(0);
+      }
+      // The descendant-walk is the only producer of a structure_request for
+      // childNodeId on reconnect; HelloHandler only re-fetches SYSTEM_NODE_ID.
+      const childRefetch = ws2StructureRequests.find(
+        r => r.structureRequest.includes(childNodeId)
+      );
+      expect(childRefetch).toBeDefined();
 
       app.close();
     } finally {
