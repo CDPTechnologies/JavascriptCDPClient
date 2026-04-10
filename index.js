@@ -1560,6 +1560,48 @@ studio.internal = (function(proto) {
       return { transport: transport, instanceKey: instanceKey };
     }
 
+    this.createServiceTransport = function(serviceId) {
+      var result = makeServiceTransport(serviceId);
+      serviceConnections.set(result.instanceKey, result.transport);
+      return result;
+    };
+
+    function isLoggerService(service) {
+      return service.type === 'websocketproxy' &&
+             service.metadata &&
+             service.metadata.proxy_type === 'logserver';
+    }
+
+    this.findLoggerService = function(name) {
+      for (var service of availableServices.values()) {
+        if (isLoggerService(service) && (!name || service.name === name)) {
+          return service;
+        }
+      }
+      return null;
+    };
+
+    this.findAllLoggerServices = function() {
+      var result = [];
+      availableServices.forEach(function(service) {
+        if (isLoggerService(service)) {
+          result.push({ name: service.name, metadata: service.metadata });
+        }
+      });
+      return result;
+    };
+
+    var serviceUpdateListeners = [];
+
+    this.addServiceUpdateListener = function(fn) {
+      serviceUpdateListeners.push(fn);
+    };
+
+    this.removeServiceUpdateListener = function(fn) {
+      var idx = serviceUpdateListeners.indexOf(fn);
+      if (idx !== -1) serviceUpdateListeners.splice(idx, 1);
+    };
+
     function resendServicesRequest() {
       if (currentMetadata && currentMetadata.compatVersion >= PROXY_MIN_COMPAT_VERSION) {
         console.log("Did not receive services notification within expected interval. Re-requesting services.");
@@ -1655,6 +1697,10 @@ studio.internal = (function(proto) {
       services.forEach(function(service) {
         // Convert serviceId to Number for consistent Map key type (protobufjs v7 returns Long for uint64)
         availableServices.set(Number(service.serviceId), service);
+      });
+
+      serviceUpdateListeners.slice().forEach(function(fn) {
+        try { fn(); } catch (e) { console.error("Service update listener threw:", e); }
       });
 
       if (!isPrimaryConnection) {
@@ -2634,7 +2680,7 @@ studio.api = (function(internal) {
         return pathParts.reduce(findNode, self.root());
       }
 
-      // timeout: 0 means immediate fail (old behavior)
+      // timeout: 0 means fail immediately if the app is not currently available
       if (options && options.timeout === 0) {
         return doFind();
       }
@@ -2656,11 +2702,257 @@ studio.api = (function(internal) {
       return system._getAppConnections();
     };
 
+    // --- Logger integration ---
+
+    var SIBLING_POLL_MS = 2000; // Poll interval for discovering new sibling connections
+    var LoggerClient = studio.logger ? studio.logger.Client : null;
+    var loggerClients = {};
+    var loggerPromises = {};
+    var pendingLoggerCleanups = [];
+
+    function getPrimaryConnection() {
+      return system._getAppConnections()[0];
+    }
+
+    function isConnectionAlive(connection) {
+      var transport = connection._getTransport();
+      return transport && transport.readyState() === WebSocket.OPEN;
+    }
+
+    function findLoggerAcrossConnections(name) {
+      var connections = system._getAppConnections();
+      for (var i = 0; i < connections.length; i++) {
+        if (!isConnectionAlive(connections[i])) continue;
+        var service = connections[i].findLoggerService(name);
+        if (service) {
+          return { connection: connections[i], service: service };
+        }
+      }
+      return null;
+    }
+
+    function findAllLoggersAcrossConnections() {
+      var result = [];
+      var connections = system._getAppConnections();
+      for (var i = 0; i < connections.length; i++) {
+        if (!isConnectionAlive(connections[i])) continue;
+        var loggers = connections[i].findAllLoggerServices();
+        for (var j = 0; j < loggers.length; j++) {
+          result.push(loggers[j]);
+        }
+      }
+      return result;
+    }
+
+    function createLoggerFromService(connection, service, cacheKey) {
+      var result = connection.createServiceTransport(Number(service.serviceId));
+      var loggerClient = new LoggerClient(result.transport, false);
+      loggerClients[cacheKey] = loggerClient;
+      return loggerClient;
+    }
+
+    /**
+     * Get a logger client for querying historic data and events (CDP 5.1+).
+     * Discovers loggers from all applications in the system, including
+     * sibling apps connected via proxy.
+     * @param {string} [name] - Logger service name to filter by, e.g. "App.CDPLogger".
+     * @param {number} [options.timeout] - Timeout in milliseconds. Without timeout, waits indefinitely until a matching logger appears. timeout: 0 rejects immediately if no matching logger is currently available.
+     * @returns {Promise.<studio.logger.Client>}
+     */
+    this.logger = function(name, options) {
+      var timeout = options && options.timeout;
+      if (!LoggerClient) {
+        return Promise.reject(new Error("Logger client not available"));
+      }
+      var cacheKey = name || '__default__';
+      if (loggerClients[cacheKey] && !loggerClients[cacheKey].disconnected) {
+        return Promise.resolve(loggerClients[cacheKey]);
+      }
+      delete loggerClients[cacheKey];
+      if (loggerPromises[cacheKey]) {
+        return loggerPromises[cacheKey];
+      }
+
+      var promise = new Promise(function(resolve, reject) {
+        system.onConnect(function() {
+          var primary = getPrimaryConnection();
+          if (!primary.supportsProxyProtocol()) {
+            reject(new Error("Logger service discovery requires CDP 5.1+"));
+            return;
+          }
+          var found = findLoggerAcrossConnections(name);
+          if (found) {
+            resolve(createLoggerFromService(found.connection, found.service, cacheKey));
+            return;
+          }
+          // timeout: 0 means fail immediately if no logger is currently available
+          if (timeout === 0) {
+            reject(new Error("Timeout: no logger service found" + (name ? " for '" + name + "'" : "")));
+            return;
+          }
+          // Wait for matching service to appear on any connection
+          var settled = false;
+          var timer = null;
+          var listenedConnections = [];
+
+          function settle() {
+            if (settled) return false;
+            settled = true;
+            clearTimeout(timer);
+            clearInterval(pollInterval);
+            listenedConnections.forEach(function(conn) {
+              conn.removeServiceUpdateListener(listener);
+            });
+            var idx = pendingLoggerCleanups.indexOf(cleanup);
+            if (idx !== -1) pendingLoggerCleanups.splice(idx, 1);
+            return true;
+          }
+
+          if (timeout) {
+            timer = setTimeout(function() {
+              if (settle()) {
+                delete loggerPromises[cacheKey];
+                reject(new Error("Timeout: no logger service found" + (name ? " for '" + name + "'" : "")));
+              }
+            }, timeout);
+          }
+
+          var pollInterval = null;
+
+          function listener() {
+            // Register on any new connections that appeared since last check
+            var connections = system._getAppConnections();
+            for (var i = 0; i < connections.length; i++) {
+              if (listenedConnections.indexOf(connections[i]) === -1) {
+                connections[i].addServiceUpdateListener(listener);
+                listenedConnections.push(connections[i]);
+              }
+            }
+            var f = findLoggerAcrossConnections(name);
+            if (f && settle()) {
+              resolve(createLoggerFromService(f.connection, f.service, cacheKey));
+            }
+          }
+
+          var cleanup = {
+            reject: function() {
+              if (settle()) {
+                delete loggerPromises[cacheKey];
+                reject(new Error("Connection closed"));
+              }
+            }
+          };
+          pendingLoggerCleanups.push(cleanup);
+          // Listen on all current connections for service updates
+          var connections = system._getAppConnections();
+          for (var i = 0; i < connections.length; i++) {
+            connections[i].addServiceUpdateListener(listener);
+            listenedConnections.push(connections[i]);
+          }
+          // Poll for new sibling connections that may appear after proxy discovery
+          pollInterval = setInterval(listener, SIBLING_POLL_MS);
+        }, reject, autoConnect);
+      });
+
+      loggerPromises[cacheKey] = promise;
+      function clearPromise() { delete loggerPromises[cacheKey]; }
+      promise.then(clearPromise, clearPromise);
+      return promise;
+    };
+
+    /**
+     * Get all available logger services. Resolves immediately if services
+     * have already been discovered, otherwise waits for the first update.
+     * @returns {Promise.<Array.<{name: string, metadata: Object}>>}
+     */
+    this.loggers = function() {
+      return new Promise(function(resolve, reject) {
+        system.onConnect(function() {
+          var primary = getPrimaryConnection();
+          if (!primary.supportsProxyProtocol()) {
+            reject(new Error("Logger service discovery requires CDP 5.1+"));
+            return;
+          }
+          // Check all connections for logger services
+          var allLoggers = findAllLoggersAcrossConnections();
+          if (allLoggers.length > 0) {
+            resolve(allLoggers);
+            return;
+          }
+          // Primary has received services but none are loggers — return current snapshot
+          if (primary.services().size > 0) {
+            resolve(allLoggers);
+            return;
+          }
+          var settled = false;
+          var listenedConnections = [];
+          function settle() {
+            if (settled) return false;
+            settled = true;
+            listenedConnections.forEach(function(conn) {
+              conn.removeServiceUpdateListener(listener);
+            });
+            var idx = pendingLoggerCleanups.indexOf(cleanup);
+            if (idx !== -1) pendingLoggerCleanups.splice(idx, 1);
+            return true;
+          }
+          function listener() {
+            if (settle()) {
+              resolve(findAllLoggersAcrossConnections());
+            }
+          }
+          var cleanup = {
+            reject: function() {
+              if (settle()) {
+                reject(new Error("Connection closed"));
+              }
+            }
+          };
+          pendingLoggerCleanups.push(cleanup);
+          var connections = system._getAppConnections();
+          for (var i = 0; i < connections.length; i++) {
+            connections[i].addServiceUpdateListener(listener);
+            listenedConnections.push(connections[i]);
+          }
+        }, reject, autoConnect);
+      });
+    };
+
+    // Wrap close() to clean up logger clients
+    var originalClose = this.close;
+    this.close = function() {
+      Object.keys(loggerClients).forEach(function(key) {
+        try { loggerClients[key].disconnect(); } catch (e) {
+          console.error("Error disconnecting logger client:", e);
+        }
+      });
+      loggerClients = {};
+      loggerPromises = {};
+      // Reject all pending logger/loggers promises and remove their listeners
+      var cleanups = pendingLoggerCleanups.slice();
+      pendingLoggerCleanups = [];
+      cleanups.forEach(function(c) { c.reject(); });
+      originalClose();
+    };
 
   };
 
   return obj;
 })(studio.internal);
+
+/* --------------------------------------------------------------------------
+ * Logger client bundle
+ * ------------------------------------------------------------------------ */
+studio.logger = (function() {
+  var isNode = (typeof process !== 'undefined') && process.versions && process.versions.node && (typeof window === 'undefined');
+  if (isNode) {
+    return require('./logger/logger-client.js');
+  }
+  if (typeof window !== 'undefined' && window.cdplogger) {
+    return window.cdplogger;
+  }
+  return null;
+})();
 
 /* --------------------------------------------------------------------------
  * Module export (CommonJS/ES Module hybrid)
