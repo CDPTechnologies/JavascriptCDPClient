@@ -260,8 +260,8 @@ result.additionalCredentials()
             Parameter parameter = [];
         }
 
-studio.api.Client(uri, notificationListener, autoConnect)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+studio.api.Client(uri, notificationListener, autoConnect, options)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 - Arguments
 
@@ -272,6 +272,35 @@ studio.api.Client(uri, notificationListener, autoConnect)
       Function credentialsRequested must return a Promise of dictionary containing 'Username' and 'Password' as keys for authentication.
 
     autoConnect - Tries to reconnect once disconnected. By default is enabled.
+
+    options - Optional object of additional client settings:
+
+      enableTimeSync - Boolean, disabled by default. When enabled, the client periodically exchanges
+      time-sync messages with the server. This keeps an otherwise-idle connection alive and
+      corrects the timestamps of incoming subscribed values into the client's clock domain, so
+      a value subscriber sees value times in its own clock rather than the server's (corrected
+      timestamps are delivered as signed 64-bit Long values). Event
+      timestamps are left in the server's clock, so an event timestamp can still be passed back
+      as the timestampFrom argument of subscribeToEvents to resume.
+
+      timeSyncPeriodSec - Number, default 10. How often (in seconds) the time-sync exchange
+      repeats while time sync is enabled. Positive values below 1 are raised to 1 and values
+      above 2147483 (just under the runtime timer maximum, about 25 days) are lowered to it; 0, a negative
+      value, Infinity, or omitting it uses the default 10. The same period sets both the
+      keep-alive interval and the clock-offset refresh rate. Ignored when enableTimeSync is not set.
+
+    To enable time sync on a client:
+
+    .. code:: javascript
+
+        // autoConnect must be passed explicitly (true) so options lands in the 4th position.
+        // notificationListener is the auth handler shown above; in a browser, pass
+        // window.location.host as the address instead of the hardcoded one:
+        const client = new studio.api.Client("127.0.0.1:7689", notificationListener, true, { enableTimeSync: true });
+
+        // optionally tune the period (seconds); default is 10:
+        const tunedClient = new studio.api.Client("127.0.0.1:7689", notificationListener, true,
+                                                  { enableTimeSync: true, timeSyncPeriodSec: 5 });
 
 - Returns
 
