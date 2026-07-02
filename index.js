@@ -619,6 +619,7 @@ studio.internal = (function(proto) {
     this.receiveValue = function (nodeValue, nodeTimestamp) {
       // Skip values with older timestamps (filters reconnect replay where
       // the server resends the last known value with its original timestamp).
+      // Runs before applyTimestampDelta, so the compare is server-vs-server.
       if (nodeTimestamp !== undefined) {
         var ts = Number(nodeTimestamp);
         if (ts > 0) {
@@ -628,8 +629,9 @@ studio.internal = (function(proto) {
         }
       }
       lastValue = nodeValue;
+      var adjustedTimestamp = app.applyTimestampDelta(nodeTimestamp);
       for (var i = 0; i < valueSubscriptions.length; i++) {
-        valueSubscriptions[i][0](nodeValue, nodeTimestamp);
+        valueSubscriptions[i][0](nodeValue, adjustedTimestamp);
       }
     };
 
@@ -670,6 +672,8 @@ studio.internal = (function(proto) {
             }
           }
         }
+        // Event timestamps stay in server-clock domain: they are the
+        // subscribeToEvents(startingFrom) resume token; shifting breaks resume.
         sub.callback(event);
       }
     };
@@ -792,7 +796,23 @@ studio.internal = (function(proto) {
     }
   }
 
-	  obj.SystemNode = function(studioURL, notificationListener, onStructureChange) {
+	  obj.SystemNode = function(studioURL, notificationListener, onStructureChange, options) {
+	    // Per-host timestamp-delta cache, scoped to this SystemNode: a later
+	    // AppConnection to the same host seeds its initial delta from here.
+	    var hostTimestampDeltas = new Map();
+	    var TIMESYNC_DELTA_THRESHOLD_NS = 20e6; // same-host churn of 20 ms or less is jitter, not drift
+	    // A delta refresh fans out to every live same-host connection (proxy ones
+	    // included — they share appConnections) and, once connected, persists as the seed.
+	    function reportHostTimestampDelta(reportedHost, deltaNs) {
+	      var cached = hostTimestampDeltas.get(reportedHost);
+	      if (cached !== undefined && Math.abs(cached - deltaNs) <= TIMESYNC_DELTA_THRESHOLD_NS) return;
+	      appConnections.forEach(function(con) {
+	        if (con._timesyncHost() === reportedHost) con._setTimestampDelta(deltaNs);
+	      });
+	      // Seed the cross-connection cache only once fully connected; a delta
+	      // measured mid-connect can be off and would seed every later same-host one.
+	      if (connected) hostTimestampDeltas.set(reportedHost, deltaNs);
+	    }
 	    var appConnections = [];
 	    var pendingConnects = [];
 	    var connected = false;
@@ -950,7 +970,8 @@ studio.internal = (function(proto) {
 
     this.onAppConnect = function(url, notificationListener, autoConnect) {
       return new Promise(function (resolve, reject) {
-        var appConnection = new obj.AppConnection(url, notificationListener, autoConnect);
+        var appConnection = new obj.AppConnection(url, notificationListener, autoConnect, options, hostTimestampDeltas);
+        appConnection._reportTimestampDelta = reportHostTimestampDelta;
         appConnections.push(appConnection);
 
         // Direct mode lifecycle: connection close → DISCONNECT, reconnect → RECONNECT
@@ -972,12 +993,14 @@ studio.internal = (function(proto) {
 
         appConnection.onServiceConnectionEstablished = function(serviceConnection, instanceKey) {
           serviceConnection.instanceKey = instanceKey;
+          serviceConnection._reportTimestampDelta = reportHostTimestampDelta;
           appConnections.push(serviceConnection);
           registerConnection(serviceConnection, function(){}, function(){});
         };
         appConnection.onServiceConnectionRemoved = function(instanceKey, closedByUser) {
           var removed = appConnections.filter(function(con) { return con.instanceKey === instanceKey; });
           removed.forEach(function(con) {
+            con._stopTimesync();
             if (con.siblingKey) {
               connectedSiblings.delete(con.siblingKey);
             }
@@ -1338,7 +1361,12 @@ studio.internal = (function(proto) {
   WebSocketTransport.prototype.reconnect = function(url, binaryType) {
     var self = this;
     if (this.ws) {
-      this.ws.onclose = null;  // Prevent triggering close handler
+      // Detach all handlers from the outgoing socket; otherwise a late frame from
+      // it reaches the new connection's handler after the replacement opens.
+      this.ws.onopen = null;
+      this.ws.onmessage = null;
+      this.ws.onerror = null;
+      this.ws.onclose = null;
       this.ws.close();
     }
     this.ws = new WebSocket(url);
@@ -1349,7 +1377,10 @@ studio.internal = (function(proto) {
     this.ws.onerror = function(e) { self.onerror && self.onerror(e); };
   };
 
-  obj.AppConnection = function(urlOrTransport, notificationListener, autoConnect) {
+  obj.AppConnection = function(urlOrTransport, notificationListener, autoConnect, options, hostDeltaCache) {
+    options = options || {};
+    var timesyncEnabled = !!options.enableTimeSync;
+    hostDeltaCache = hostDeltaCache || new Map();
     var appConnection = this;
     var appUrl;
     var socketTransport;
@@ -1381,6 +1412,7 @@ studio.internal = (function(proto) {
     var reconnectTimeoutId = null;
     var currentMetadata = null;
     var closedIntentionally = false;  // Set by close() to prevent reconnection
+    var transportAlive = true; // cleared on teardown, set on (re)open; drops stale containers from a dead socket
     var hasNotifiedDisconnect = false; // Guard for onDisconnected lifecycle callback
     var hasConnectedBefore = false; // Distinguishes initial connect from reconnect
     const SERVICES_TIMEOUT_MS = (INACTIVITY_RESEND_INTERVAL_S + 30) * 1000;
@@ -1390,6 +1422,35 @@ studio.internal = (function(proto) {
     const STALL_CHECK_INTERVAL_MS = 15000;
     const STALL_TIMEOUT_MS = (typeof process !== 'undefined' && process.env && Number(process.env.CDP_STALL_TIMEOUT_MS))
         || (INACTIVITY_RESEND_INTERVAL_S + 30) * 1000; // must exceed inactivityResendInterval
+    // Periodic eCurrentTimeRequest is a keep-alive (prevents idle proxy/LB/NAT
+    // disconnect) and a clock-offset estimate; one period drives both.
+    const TIMESYNC_PERIOD_MAX_SEC = 2147483; // setInterval clamps delays above 2^31-1 ms down to 1 ms
+    const TIMESYNC_DEFAULT_PERIOD_SEC = 10;
+    const TIMESYNC_PERIOD_MS = (Number.isFinite(options.timeSyncPeriodSec) && options.timeSyncPeriodSec > 0
+        ? Math.max(1, Math.min(options.timeSyncPeriodSec, TIMESYNC_PERIOD_MAX_SEC))
+        : TIMESYNC_DEFAULT_PERIOD_SEC) * 1000;
+    const TIMESYNC_SAMPLE_COUNT = 3;
+    // Epoch-anchored monotonic clock: wall-clock steps must not corrupt RTT/age.
+    // Resolved lazily so timesync-disabled clients never touch `performance`
+    // (a global only since Node 16; perf_hooks fallback covers older Node).
+    var timesyncEpochAnchorNs = null;
+    var timesyncPerf = null;
+    function timesyncMonoMs() {
+      if (timesyncPerf === null) {
+        timesyncPerf = typeof performance !== 'undefined' ? performance : require('perf_hooks').performance;
+      }
+      return timesyncPerf.now();
+    }
+    function timesyncNowNs() {
+      if (timesyncEpochAnchorNs === null) timesyncEpochAnchorNs = Date.now() * 1e6 - timesyncMonoMs() * 1e6;
+      return timesyncEpochAnchorNs + timesyncMonoMs() * 1e6;
+    }
+    // host/delta are set post-handshake in _initTimesync.
+    var host = null;
+    var timestampDeltaNs = 0;
+    var timesyncTimer = null;
+    var timesyncWatchdog = null; // per-request unanswered deadline
+    var timesyncSamples = [];
     nodeMap.set(systemNode.id(), systemNode);
     handler.onContainer = handleIncomingContainer;
     this.resubscribe = function(item) {
@@ -1438,8 +1499,8 @@ studio.internal = (function(proto) {
       reconnectTimeoutId = setTimeout(function() {
         reconnectTimeoutId = null;
         if (!socketTransport) return;
-        // Ensure proxy state is cleaned up (may already be done by onClosed, but
-        // onError can fire without onClose in Node.js — idempotent if already clean)
+        // Re-clean right before reconnecting: drops anything queued or re-armed
+        // during the backoff window (error/close already cleaned once; idempotent).
         cleanupPrimaryConnectionState();
         console.log(logMessage + " (backoff: " + delay + "ms)");
         socketTransport.reconnect(appUrl, proto.BINARY_TYPE);
@@ -1652,8 +1713,129 @@ studio.internal = (function(proto) {
 
     this._startStallDetection = startStallDetection;
 
+    // === Timesync ===
+    // 3-sample cycle; the min-RTT sample gives the least-jittered offset estimate.
+    // Offset is signed: negative when the server clock is ahead.
+    function emitCurrentTimeRequest() {
+      // send() throws while CONNECTING and transmits nothing unless OPEN; skip
+      // the tick (cleanup/reconnect re-arms the cycle).
+      if (!socketTransport || socketTransport.readyState() !== WebSocket.OPEN) return;
+      var msg = proto.Container.create();
+      msg.messageType = proto.ContainerType.eCurrentTimeRequest;
+      timesyncSamples.push({ packetSent: timesyncNowNs(), packetReceived: 0, remoteTime: 0 });
+      // Raw send, not the queueing send(): a request replayed after reconnect
+      // would mis-correlate with the new cycle; the watchdog covers the loss.
+      socketTransport.send(proto.Container.encode(msg).finish());
+      // Per-request deadline: unanswered for a full period, discard the cycle
+      // and re-emit so keep-alive continues.
+      timesyncWatchdog = setTimeout(function() {
+        timesyncSamples = [];
+        emitCurrentTimeRequest();
+      }, TIMESYNC_PERIOD_MS);
+    }
+
+    function parseCurrentTimeResponse(remoteTimeNs) {
+      if (timesyncSamples.length === 0) return; // unsolicited response — ignore
+      clearTimeout(timesyncWatchdog);
+      timesyncWatchdog = null;
+      var last = timesyncSamples[timesyncSamples.length - 1];
+      last.packetReceived = timesyncNowNs();
+      last.remoteTime = Number(remoteTimeNs);
+      if (timesyncSamples.length < TIMESYNC_SAMPLE_COUNT) {
+        emitCurrentTimeRequest();
+        return;
+      }
+      computeAndStoreTimestampDelta();
+    }
+
+    function computeAndStoreTimestampDelta() {
+      var minRttSample = null;
+      var minRtt = 0;
+      for (var i = 0; i < timesyncSamples.length; i++) {
+        var s = timesyncSamples[i];
+        var rtt = s.packetReceived - s.packetSent;
+        if (minRttSample === null || rtt < minRtt) {
+          minRttSample = s;
+          minRtt = rtt;
+        }
+      }
+      // A post-watchdog response lands in the re-emitted sample (near-zero RTT,
+      // period-stale remoteTime). Honest offsets agree within the samples' RTTs;
+      // a wider spread is a contaminated cycle — drop it, the interval re-measures.
+      var minOffset = minRttSample.packetReceived - minRttSample.remoteTime;
+      for (var i = 0; i < timesyncSamples.length; i++) {
+        var s = timesyncSamples[i];
+        var offsetSpread = Math.abs((s.packetReceived - s.remoteTime) - minOffset);
+        if (offsetSpread > (s.packetReceived - s.packetSent) + minRtt) {
+          timesyncSamples = [];
+          return;
+        }
+      }
+      timesyncSamples = [];
+      var delta = minRttSample.packetReceived - (minRttSample.remoteTime + minRtt / 2);
+      appConnection._reportTimestampDelta(host, delta);
+    }
+
+    // Default reporter (direct construction): apply locally and seed the cache.
+    // SystemNode overrides this with the thresholded same-host fan-out.
+    this._reportTimestampDelta = function(reportedHost, deltaNs) {
+      timestampDeltaNs = deltaNs;
+      hostDeltaCache.set(reportedHost, deltaNs);
+    };
+    this._setTimestampDelta = function(deltaNs) { timestampDeltaNs = deltaNs; };
+    this._timesyncHost = function() { return host; };
+
+    function startTimesync() {
+      emitCurrentTimeRequest();
+      timesyncTimer = setInterval(function() {
+        if (timesyncSamples.length === 0) emitCurrentTimeRequest();
+      }, TIMESYNC_PERIOD_MS);
+    }
+
+    function stopTimesync() {
+      if (timesyncTimer) {
+        clearInterval(timesyncTimer);
+        timesyncTimer = null;
+      }
+      clearTimeout(timesyncWatchdog);
+      timesyncWatchdog = null;
+      timesyncSamples = [];
+    }
+
+    // Proxy tunnel close (via onServiceConnectionRemoved): stop the timer — proxy
+    // connections bypass cleanupPrimaryConnectionState so it would otherwise leak —
+    // and clear currentMetadata so a reconnect re-enters the post-handshake re-arm.
+    this._stopTimesync = function() {
+      stopTimesync();
+      currentMetadata = null;
+    };
+
+    // hostKey is host-only (the clock offset is per-machine, shared across apps).
+    this._initTimesync = function(hostKey) {
+      host = hostKey;
+      if (timesyncEnabled && hostDeltaCache.has(host)) {
+        timestampDeltaNs = hostDeltaCache.get(host);
+      }
+      if (timesyncEnabled) startTimesync();
+    };
+
+    // Shift incoming server timestamps into client-clock terms. Long arithmetic
+    // keeps the full ns resolution that Number() loses past 2^53.
+    this.applyTimestampDelta = function(ts) {
+      // == null covers undefined too: a value frame may omit its timestamp
+      // (receiveValue passes it through), and Long.fromValue throws on both.
+      if (!timesyncEnabled || ts == null) return ts;
+      var t = protobuf.util.Long.fromValue(ts);
+      if (t.isZero()) return ts; // absent timestamp (proto2 Long(0)): no clock to correct
+      // Signed add: a negative delta would underflow an unsigned Long toward 2^64.
+      return t.toSigned().add(timestampDeltaNs);
+    };
+    this._timestampDeltaNs = function() { return timestampDeltaNs; };
+    this._timesyncTimerActive = function() { return timesyncTimer !== null; };
+
     function cleanupPrimaryConnectionState() {
       if (!isPrimaryConnection) return;
+      transportAlive = false;
       // Notify service instances of disconnect
       var keysToDisconnect = Array.from(serviceConnections.keys());
       keysToDisconnect.forEach(function(instanceKey) {
@@ -1668,6 +1850,8 @@ studio.internal = (function(proto) {
       currentMetadata = null;
       requests = [];
       stopStallDetection();
+      stopTimesync();
+      clearServicesTimeout();
     }
 
     this.onServicesReceived = function(services, metadata) {
@@ -1751,6 +1935,10 @@ studio.internal = (function(proto) {
 
       var proxyConnection;
       var newServiceId = Number(service.serviceId);
+      var proxySiblingKey = addr + ':' + port;
+      // Host-only key (offset is per-machine, shared across ports); siblingKey
+      // keeps addr:port since it is a reconnect-lookup identity, not a host key.
+      var proxyCacheKey = addr;
 
       if (existingConnection) {
         // Reconnect existing transport with new service instance — preserves nodes and callbacks
@@ -1769,9 +1957,10 @@ studio.internal = (function(proto) {
         serviceConnections.set(instanceKey, proxyConnection);
       } else {
         var result = makeServiceTransport(newServiceId);
-        proxyConnection = new obj.AppConnection(result.transport, notificationListener, autoConnect);
+        proxyConnection = new obj.AppConnection(result.transport, notificationListener, autoConnect, options, hostDeltaCache);
         proxyConnection.instanceKey = result.instanceKey;
-        proxyConnection.siblingKey = addr + ':' + port;
+        proxyConnection.siblingKey = proxySiblingKey;
+        proxyConnection.proxyCacheKey = proxyCacheKey;
         serviceConnections.set(result.instanceKey, proxyConnection);
       }
 
@@ -1859,19 +2048,33 @@ studio.internal = (function(proto) {
     };
 
     onMessage = function(evt) { handler.handle(evt.data); };
+    // Fire onDisconnected once per disconnect; the hasNotifiedDisconnect guard
+    // keeps it safe across an error-then-close sequence.
+    function notifyDisconnectedOnce() {
+      if (!hasNotifiedDisconnect && appConnection.onDisconnected) {
+        hasNotifiedDisconnect = true;
+        appConnection.onDisconnected();
+      }
+    }
     onError = function (ev) {
       if (closedIntentionally) return;
       console.log("Socket error: " + ev.data);
-      // Schedule reconnect on error if close doesn't fire (Node.js ws behavior)
+      // Error can arrive without a close (Node.js ws behavior): notify once,
+      // stop the stall and timesync timers, and schedule the reconnect — all
+      // idempotent with a close that may still follow.
+      notifyDisconnectedOnce();
+      cleanupPrimaryConnectionState();
       scheduleReconnect("Retrying reconnect after error...");
     };
     onOpen = function() {
+      transportAlive = true;
       // Clear any pending reconnect timeout since we're now connected
       clearTimeout(reconnectTimeoutId);
       reconnectTimeoutId = null;
       reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
       hasNotifiedDisconnect = false; // Reset disconnect guard for next cycle
       startStallDetection();
+      // Timesync arms in _initTimesync (post-handshake), not here.
       // Note: For proxy connections, connectViaProxy overwrites transport.onopen
       // and calls _startStallDetection() there instead.
       // Primary handler recreation happens in scheduleReconnect before reconnect().
@@ -1923,13 +2126,9 @@ studio.internal = (function(proto) {
       console.log("Socket close: " + reason);
 
       // Notify lifecycle callback once per disconnect (not on each reconnection attempt)
-      if (!hasNotifiedDisconnect && appConnection.onDisconnected) {
-        hasNotifiedDisconnect = true;
-        appConnection.onDisconnected();
-      }
+      notifyDisconnectedOnce();
 
       stopStallDetection();
-      clearServicesTimeout();
       clearTimeout(reconnectTimeoutId);
       reconnectTimeoutId = null;
       reauthRequestPending = false;  // Reset to allow reauth on reconnect
@@ -2208,11 +2407,22 @@ studio.internal = (function(proto) {
     }
 
     function handleIncomingContainer(protoContainer, metadata) {
+      // Drop containers from a torn-down primary transport (error/close) until
+      // the next open, so a late frame on a dead primary socket cannot re-arm
+      // timesync. Proxy teardown routes through _stopTimesync instead.
+      if (!transportAlive) return;
       lastServerMessageTime = Date.now(); // Update stall detection timestamp
       // Set currentMetadata from Hello message immediately (not just on ServicesNotification)
       // This ensures supportsProxyProtocol() works before ServicesNotification arrives
       if (!currentMetadata && metadata) {
         currentMetadata = metadata;
+        // Post-handshake: this branch is the first point after Hello/Auth, so
+        // arming timesync here (primary and proxy, host-only key) never races it.
+        if (isPrimaryConnection) {
+          appConnection._initTimesync(new URL(appUrl).hostname);
+        } else {
+          appConnection._initTimesync(appConnection.proxyCacheKey);
+        }
         // Start services timeout for primary connections with proxy support
         // This handles the case where ServicesNotification is never received
         if (isPrimaryConnection && metadata.compatVersion >= PROXY_MIN_COMPAT_VERSION && !servicesTimeoutId) {
@@ -2233,6 +2443,11 @@ studio.internal = (function(proto) {
           parseEventResponse(protoContainer.eventResponse);
           break;
         case proto.ContainerType.eCurrentTimeResponse:
+          // Presence check: an absent field decodes to Long(0), which would
+          // record remoteTime=0 on the in-flight sample and poison the delta.
+          if (Object.prototype.hasOwnProperty.call(protoContainer, 'currentTimeResponse')) {
+            parseCurrentTimeResponse(protoContainer.currentTimeResponse);
+          }
           break;
         case proto.ContainerType.eReauthResponse:
           parseReauthResponse(protoContainer.reAuthResponse, metadata);
@@ -2277,9 +2492,9 @@ studio.internal = (function(proto) {
     this.close = function() {
       closedIntentionally = true;
       stopStallDetection();
+      stopTimesync(); // directly: cleanupPrimaryConnectionState skips proxy connections
       clearTimeout(reconnectTimeoutId);
       reconnectTimeoutId = null;
-      clearServicesTimeout();
       reauthRequestPending = false;
       cleanupPrimaryConnectionState();
       if (socketTransport) {
@@ -2586,17 +2801,19 @@ studio.api = (function(internal) {
    *
    * @param studioURL String containing the address and port of StudioAPI server separated by colon character
    * @param notificationListener Object returning two functions: applicationAcceptanceRequested(AuthRequest) and credentialsRequested(AuthRequest). Function credentialsRequested must return a Promise of dictionary containing 'Username' and 'Password' as keys for authentication.
+   * @param autoConnect Boolean, default true. Reconnect automatically after a disconnect.
+   * @param options Optional settings object. options.enableTimeSync (Boolean, default false) enables periodic keep-alive/time-sync; options.timeSyncPeriodSec (Number, default 10) sets the period in seconds (positive values below 1 are raised to 1, values above 2147483 are lowered to it).
    *
    * @this Client
    * @constructor
    */
-  obj.Client = function(studioURL, notificationListener, autoConnect = true) {
+  obj.Client = function(studioURL, notificationListener, autoConnect = true, options = {}) {
     var findNodeCacheInvalidator = null;  // Set after findNodeCache is created
 
     var system = new internal.SystemNode(studioURL, notificationListener, function(appName) {
       // Called on app structure changes (ADD, DISCONNECT, or RECONNECT)
       findNodeCacheInvalidator(appName);
-    });
+    }, options);
 
     /**
      * Request root node.
